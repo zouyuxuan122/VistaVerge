@@ -1,0 +1,18 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "strict": true,
+    "noEmit": true,
+    "skipLibCheck": true,
+    "types": ["vite/client"],
+    "paths": {
+      "@contracts/*": ["../packages/contracts/src/*"]
+    }
+  },
+  "include": ["src", "tests", "vite.config.ts", "vitest.config.ts"],
+  "exclude": [
+    "tests/unit/mic-capture.test.ts"
+  ]
+}

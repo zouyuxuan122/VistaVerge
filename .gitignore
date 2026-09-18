@@ -1,0 +1,66 @@
+# Dependencies and generated outputs
+**/node_modules/
+**/target/
+**/dist/
+/desktop/dist-beta*/
+/desktop/.live2d-hold/
+**/build/
+**/__pycache__/
+**/.pytest_cache/
+**/.mypy_cache/
+**/.ruff_cache/
+**/.venv/
+**/venv/
+**/coverage/
+**/test-results/
+**/playwright-report/
+**/*.egg-info/
+
+# Secrets, private runtime data, diagnostics
+.env
+.env.*
+!.env.example
+**/cloud.env
+**/*.key
+**/*.pem
+**/*.p12
+**/*.pfx
+**/*.db
+**/*.db-*
+**/*.sqlite
+**/*.sqlite-*
+**/*.log
+**/.DS_Store
+.vistaverge/
+.superpowers/
+
+# Legacy downloads and unlicensed/private assets stay local
+/deploy-package/
+/s2s-source.tar.gz
+/desktop/src/assets/
+/desktop/icon-src.png
+# 图标：Windows/Store 用 PNG+ICO 已改为原创占位图（可入库，保证 clone 即可构建）；
+# macOS icns 与 android 仍来自用户自备原图，不入库
+/desktop/src-tauri/icons/android/
+/desktop/src-tauri/icons/ios/
+/desktop/src-tauri/icons/icon.icns
+/docs/shots/
+/verify/*.wav
+/verify/*.pcm
+/verify/*.png
+/verify/*.jpg
+**/*.pth
+**/*.safetensors
+**/*.onnx
+**/*.gguf
+**/*.exe
+**/*.msi
+**/*.zip
+**/*.tar.gz
+
+# Do not stage the vendored reference tree wholesale before provenance review
+/s2s/
+
+# Live2D 用户自备模型（不入库、不随发行版分发）
+/desktop/public/live2d/
+

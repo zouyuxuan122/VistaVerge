@@ -1,0 +1,20 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "桌面应用默认能力：核心 API + 云端 HTTP 直连（绕过 CORS）",
+  "windows": ["main"],
+  "permissions": [
+    "core:default",
+    {
+      "identifier": "http:default",
+      "allow": [
+        { "url": "https://**" },
+        { "url": "http://**" },
+        { "url": "http://*:*" },
+        { "url": "https://*:*" },
+        { "url": "http://127.0.0.1:*" },
+        { "url": "http://localhost:*" }
+      ]
+    }
+  ]
+}
