@@ -1,4 +1,19 @@
 /* VistaVerge — 电影感暗夜主题：氛围打底，界面退到最轻 */
+
+/* 手绘展示字体（站酷快乐体）本地化：OFL-1.1，文件与校验见 public/fonts/PROVENANCE.md。
+   只用于手绘主题的标题/页签/气泡名，正文仍走系统无衬线，保证可读性与首屏成本。 */
+@font-face {
+  font-family: "ZCOOL KuaiLe";
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url("/fonts/ZCOOLKuaiLe-Regular.woff2") format("woff2");
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC,
+    U+0304, U+0308, U+0329, U+2000-206F, U+2074, U+20AC, U+2122, U+2191, U+2193, U+2212,
+    U+2215, U+FEFF, U+FFFD, U+3000-303F, U+FF00-FFEF, U+2E80-2EFF, U+31C0-31EF, U+3400-4DBF,
+    U+4E00-9FFF, U+F900-FAFF;
+}
+
 * { box-sizing: border-box; }
 html, body, #app { height: 100%; margin: 0; }
 body {
@@ -25,6 +40,10 @@ body {
   --radius-lg: 20px;
   --radius-md: 14px;
   --shadow: 0 24px 70px rgba(0, 0, 0, 0.55);
+  /* 显示器外框：写实是厚黑色边框 + 内屏凹槽（G-UI-04） */
+  --bezel: #0a0c11;
+  --bezel-w: 12px;
+  --bezel-inner: rgba(255, 255, 255, 0.09);
   --font-display: "Noto Sans SC", "PingFang SC", "Segoe UI", sans-serif;
   --font-mono: "Geist Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
   /* 语音球状态色（移植自最初前端 s2s/demo）：色彩属于声音，镀铬保持单色 */
@@ -52,7 +71,12 @@ body {
   --radius-lg: 22px 18px 24px 16px;
   --radius-md: 15px 13px 16px 12px;
   --shadow: 6px 6px 0 rgba(43, 38, 34, 0.82);
-  --font-display: "Noto Sans SC", "PingFang SC", "Segoe UI", sans-serif;
+  --font-display: "ZCOOL KuaiLe", "Noto Sans SC", "PingFang SC", "Segoe UI", sans-serif;
+  --font-hand: "ZCOOL KuaiLe", "Noto Sans SC", "PingFang SC", sans-serif;
+  /* 手绘：外框用油墨线（已有的 2px 描边），不叠厚黑边 */
+  --bezel: transparent;
+  --bezel-w: 0px;
+  --bezel-inner: transparent;
   --font-mono: "Geist Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
   --orb-idle: #e8543f;
   --listening: #0e9aa8;
@@ -100,6 +124,69 @@ body.booting, body.booting *, body.booting *::before, body.booting *::after {
 }
 .topbar-right { display: flex; align-items: center; gap: 10px; flex: none; padding-top: 4px; }
 
+/* 顶栏中段：链路状态 + 实时时钟 + 装饰分隔（G-UI-06，填掉顶栏中部的空） */
+.topbar-mid {
+  flex: 1 1 auto; min-width: 0; align-self: center;
+  display: flex; align-items: center; gap: 14px; padding-top: 6px;
+}
+.tm-rule { flex: 1 1 auto; min-width: 18px; height: 1px; background: linear-gradient(90deg, transparent, var(--line-strong), transparent); }
+.tm-readout { display: inline-flex; align-items: center; gap: 14px; flex: none; }
+.tm-status { display: inline-flex; align-items: center; gap: 7px; font-size: 11.5px; color: var(--muted); white-space: nowrap; }
+.tm-status .dot { width: 6px; height: 6px; border-radius: 50%; background: var(--ok); box-shadow: 0 0 8px var(--ok); }
+.tm-status.mock .dot { background: var(--accent-warm); box-shadow: 0 0 8px var(--accent-warm); }
+.tm-status.offline .dot { background: var(--err); box-shadow: 0 0 8px var(--err); }
+.tm-time { font-family: var(--font-mono); font-size: 12px; letter-spacing: 0.08em; color: var(--text); white-space: nowrap; }
+[data-theme="handdrawn"] .tm-time { color: var(--ink); font-family: var(--font-display); font-size: 14px; letter-spacing: 0.02em; }
+[data-theme="handdrawn"] .tm-status { color: var(--muted); }
+[data-theme="handdrawn"] .tm-rule { background: linear-gradient(90deg, transparent, rgba(43, 38, 34, 0.4), transparent); }
+
+/* 人物区状态浮签：她在做什么（G-UI-06） */
+.scene-status {
+  position: fixed; top: 92px; right: 26px; z-index: 2; pointer-events: none;
+  display: inline-flex; align-items: center; gap: 9px;
+  padding: 8px 15px; border-radius: 999px;
+  background: var(--panel); border: 1px solid var(--line); backdrop-filter: blur(12px);
+  font-size: 11.5px; color: var(--muted); white-space: nowrap;
+  animation: status-in 0.4s cubic-bezier(0.22, 1, 0.36, 1);
+}
+@keyframes status-in { from { opacity: 0; transform: translateX(10px); } to { opacity: 1; transform: none; } }
+.scene-status .ss-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--faint); }
+.scene-status.st-listening .ss-dot { background: var(--listening); box-shadow: 0 0 9px var(--listening); }
+.scene-status.st-working .ss-dot { background: var(--processing); box-shadow: 0 0 9px var(--processing); }
+.scene-status.st-speaking .ss-dot { background: var(--speaking); box-shadow: 0 0 9px var(--speaking); }
+.scene-status.st-speaking .ss-dot, .scene-status.st-working .ss-dot { animation: breathe 1.1s infinite; }
+.scene-status .ss-label { letter-spacing: 0.14em; color: var(--faint); font-size: 10px; }
+.scene-status .ss-value { color: var(--text); font-weight: 600; }
+[data-theme="handdrawn"] .scene-status {
+  background: rgba(255, 253, 247, 0.96); border: 1.5px solid var(--ink); backdrop-filter: none;
+  box-shadow: 3px 3px 0 rgba(43, 38, 34, 0.25); transform: rotate(1.4deg);
+  animation: none;
+}
+[data-theme="handdrawn"] .scene-status .ss-value { font-family: var(--font-display); font-weight: 400; color: var(--ink); }
+[data-theme="handdrawn"] .scene-status .ss-label { color: var(--faint); }
+
+/* 桌面小物：底部两侧的贴纸/便签（G-UI-06；写实主题隐藏，保持电影感极简） */
+.desk-trinkets { position: fixed; inset: 0; z-index: 2; pointer-events: none; display: none; }
+[data-theme="handdrawn"] .desk-trinkets { display: block; }
+.desk-trinkets .trinket {
+  position: absolute; display: inline-flex; align-items: center; gap: 6px;
+  font-size: 12px; font-weight: 700; color: var(--ink);
+  background: #fff; border: 1.5px solid var(--ink); padding: 7px 12px;
+  box-shadow: 3px 3px 0 rgba(43, 38, 34, 0.28);
+}
+.trinket-sticker {
+  left: 24px; bottom: 26px; transform: rotate(-3.5deg);
+  background: #ffd23e !important; border-radius: 13px 15px 12px 16px;
+}
+.trinket-note {
+  right: 24px; bottom: 92px; transform: rotate(2.2deg);
+  border-radius: 4px 4px 12px 4px; font-family: var(--font-display); font-weight: 400; font-size: 14px;
+}
+.trinket-note::before { /* 便签上的一角胶带 */
+  content: ""; position: absolute; top: -8px; left: 50%; transform: translateX(-50%) rotate(-6deg);
+  width: 42px; height: 14px; background: rgba(232, 84, 63, 0.4);
+}
+
 .cloud-badge {
   display: inline-flex; align-items: center; gap: 7px;
   font-size: 12px; color: var(--muted);
@@ -144,8 +231,11 @@ body.booting, body.booting *, body.booting *::before, body.booting *::after {
   position: relative; z-index: 1;
   display: flex; align-items: stretch;
   padding: 10px 0 118px 26px; /* 底部留给状态行与胶囊导航 */
+  /* 全宽透明层不得吃掉人物区的点击（戳一戳热区在她身上）：
+     舞台本体穿透，只有屏幕面板恢复接收输入。 */
+  pointer-events: none;
 }
-.stage > .screen-pane { flex: 1 1 auto; margin-right: 50vw; } /* 覆盖到她左缘淡入区为止 */
+.stage > .screen-pane { flex: 1 1 auto; margin-right: 50vw; pointer-events: auto; } /* 覆盖到她左缘淡入区为止 */
 
 /* 底部状态行（最初前端的 footer 位）：低语，不喊叫 */
 .statusbar {
@@ -170,8 +260,87 @@ body.booting, body.booting *, body.booting *::before, body.booting *::after {
   content: ""; position: absolute; inset: 0; z-index: 5; pointer-events: none;
   background: linear-gradient(115deg, rgba(255, 255, 255, 0.045) 0%, transparent 24%);
 }
+
+/* ── 显示器化：外框厚度 + 内屏凹槽 + 电源灯（G-UI-04，纯装饰不拦输入） ── */
+.monitor-bezel {
+  position: absolute; inset: 0; z-index: 5; pointer-events: none;
+  border: var(--bezel-w) solid var(--bezel);
+  border-radius: inherit;
+  box-shadow: inset 0 0 0 1px var(--bezel-inner), inset 0 0 26px rgba(0, 0, 0, 0.28);
+}
+.monitor-led {
+  position: absolute; right: 22px; bottom: calc(var(--bezel-w) / 2 - 2.5px);
+  width: 5px; height: 5px; border-radius: 50%;
+  background: var(--ok); box-shadow: 0 0 6px var(--ok);
+  transition: background 0.4s, box-shadow 0.4s;
+}
+.monitor-led::after { /* 电源灯外的微光晕 */
+  content: ""; position: absolute; inset: -3px; border-radius: 50%;
+  background: radial-gradient(circle, color-mix(in srgb, var(--ok) 45%, transparent), transparent 70%);
+}
+/* 状态灯随语音状态变色：一眼看出她是在听、在想还是在说 */
+.st-listening .monitor-led, .st-user-speaking .monitor-led { background: var(--listening); box-shadow: 0 0 6px var(--listening); }
+.st-processing .monitor-led { background: var(--processing); box-shadow: 0 0 6px var(--processing); }
+.st-ai-speaking .monitor-led { background: var(--speaking); box-shadow: 0 0 6px var(--speaking); }
+
+/* 屏幕左上角控制条：二次元/正常 拨杆 + 对话/映射 拨杆 + 装饰标识 */
+.monitor-bar {
+  flex: none; position: relative; z-index: 6;
+  display: flex; align-items: center; gap: 12px;
+  padding: calc(var(--bezel-w) + 2px) 18px 4px;
+}
+.monitor-brand {
+  margin-left: auto; font-family: var(--font-mono); font-size: 9px;
+  letter-spacing: 0.22em; color: var(--faint); white-space: nowrap;
+}
+
+/* 物理拨杆（滑块动效）：二次元（左） / 正常（右） */
+.theme-lever, .view-toggle {
+  position: relative; display: inline-flex; align-items: center;
+  padding: 3px; border-radius: 999px;
+  border: 1px solid var(--line-strong); background: rgba(0, 0, 0, 0.22);
+}
+.theme-lever button, .view-toggle button {
+  position: relative; z-index: 1; border: 0; background: transparent;
+  font: inherit; font-size: 11.5px; color: var(--muted);
+  padding: 4px 13px; border-radius: 999px; cursor: pointer;
+  transition: color 0.2s;
+}
+.theme-lever button[aria-pressed="true"], .view-toggle button[aria-pressed="true"] { color: var(--text); }
+.theme-lever .tl-knob { /* 滑块：随主题左右滑动 */
+  position: absolute; z-index: 0; top: 3px; bottom: 3px; width: 52px;
+  border-radius: 999px; background: rgba(142, 162, 255, 0.28);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.35);
+  transition: left 0.28s cubic-bezier(0.3, 1.4, 0.5, 1);
+}
+.theme-lever .tl-knob.is-left { left: 3px; }
+.theme-lever .tl-knob.is-right { left: 58px; }
+.view-toggle button[aria-pressed="true"] { background: rgba(142, 162, 255, 0.18); }
+
+/* 显示器底座（App.vue 里的装饰层，落在屏幕面板下方、胶囊上方） */
+.monitor-stand {
+  position: absolute; left: calc(50% - 25vw + 13px); transform: translateX(-50%);
+  bottom: 72px; width: 168px; height: 46px; z-index: 0;
+  pointer-events: none;
+}
+.monitor-stand::before { /* 颈 */
+  content: ""; position: absolute; left: 50%; top: 0; transform: translateX(-50%);
+  width: 46px; height: 30px; background: var(--stand, #14171f);
+  clip-path: polygon(18% 0, 82% 0, 100% 100%, 0 100%);
+}
+.monitor-stand::after { /* 底座 */
+  content: ""; position: absolute; left: 0; right: 0; bottom: 0; height: 16px;
+  background: var(--stand, #14171f); border-radius: 50% 50% 10px 10px / 60% 60% 12px 12px;
+}
+[data-theme="realistic"] { --stand: #14171f; }
+[data-theme="handdrawn"] .monitor-stand::before,
+[data-theme="handdrawn"] .monitor-stand::after {
+  background: var(--ink); border: 0;
+}
+[data-theme="handdrawn"] .monitor-stand::after { border-radius: 40% 40% 8px 8px / 70% 70% 10px 10px; }
+
 .screen-tabs {
-  display: flex; gap: 20px; padding: 14px 20px 0;
+  display: flex; flex-wrap: wrap; gap: 8px 20px; padding: 12px 20px 0;
   border-bottom: 1px solid var(--line);
 }
 .screen-tabs button {
@@ -183,7 +352,7 @@ body.booting, body.booting *, body.booting *::before, body.booting *::after {
 .screen-tabs button:hover { color: var(--muted); }
 .screen-tabs button[aria-selected="true"] { color: var(--text); border-bottom-color: var(--accent); }
 .screen-body { flex: 1; min-height: 0; display: flex; flex-direction: column; }
-.pane-scroll { flex: 1; min-height: 0; overflow-y: auto; padding: 18px 22px; }
+.pane-scroll { position: relative; flex: 1; min-height: 0; overflow-y: auto; padding: 18px 22px; }
 .pane-scroll::-webkit-scrollbar { width: 6px; }
 .pane-scroll::-webkit-scrollbar-thumb { background: rgba(255, 255, 255, 0.1); border-radius: 6px; }
 
@@ -208,7 +377,7 @@ body.booting, body.booting *, body.booting *::before, body.booting *::after {
   white-space: pre-wrap; word-break: break-word; color: var(--text);
 }
 .msg.role-assistant .bubble { padding: 10px 16px; background: rgba(255, 255, 255, 0.045); border-radius: var(--radius-md); }
-.msg.role-user .bubble { padding: 10px 16px; border: 1px solid var(--line-strong); border-radius: var(--radius-md); color: var(--muted); }
+.msg.role-user .bubble { padding: 10px 16px; border: 1px solid var(--line-strong); border-radius: var(--radius-md); color: var(--text); background: rgba(255, 255, 255, 0.03); } /* B-U-06：写实用户气泡提对比 */
 .msg .tools { display: flex; gap: 10px; margin-top: 7px; opacity: 0; transition: opacity 0.18s; }
 .msg:hover .tools, .msg .tools:focus-within { opacity: 1; }
 .msg .tools span { font-size: 10px; color: var(--faint); align-self: center; }
@@ -268,8 +437,40 @@ body.booting, body.booting *, body.booting *::before, body.booting *::after {
   min-height: 320px; display: grid; place-items: center; overflow: hidden;
   background: rgba(0, 0, 0, 0.28);
 }
-.mirror-stage video { width: 100%; height: 100%; object-fit: contain; }
-.mirror-stage .placeholder { color: var(--muted); font-size: 13px; text-align: center; padding: 24px; line-height: 2; }
+.mirror-stage video { position: relative; z-index: 1; width: 100%; height: 100%; object-fit: contain; }
+.mirror-stage .placeholder { position: relative; z-index: 2; color: var(--muted); font-size: 13px; text-align: center; padding: 24px; line-height: 2; }
+.readonly-tag { display: inline-flex; align-items: center; gap: 6px; }
+.readonly-tag .ro-icon { flex: none; }
+
+/* 只读语义视觉化（G-UI-05）：扫描线 + 水印，图标+文案不依赖颜色 */
+.mirror-scanlines {
+  position: absolute; inset: 0; z-index: 3; pointer-events: none;
+  background: repeating-linear-gradient(0deg, rgba(255, 255, 255, 0.05) 0 1px, transparent 1px 4px);
+  mix-blend-mode: overlay;
+}
+.mirror-stage.is-live .mirror-scanlines { animation: mirror-scan 6s linear infinite; }
+@keyframes mirror-scan { from { background-position-y: 0; } to { background-position-y: 120px; } }
+.mirror-watermark {
+  position: absolute; top: 10px; right: 12px; z-index: 4; pointer-events: none;
+  display: inline-flex; align-items: center; gap: 6px;
+  font-size: 10px; letter-spacing: 0.1em; color: var(--muted);
+  background: rgba(8, 11, 18, 0.6); border: 1px solid var(--line); border-radius: 999px;
+  padding: 4px 10px;
+}
+/* 手绘：白底油墨框，placeholder 用墨色（对比度修复 B-U-02）；斜纹与 AI 工作区区分 */
+[data-theme="handdrawn"] .mirror-stage {
+  background-color: #fff; border: 1.5px solid var(--ink);
+  background-image: repeating-linear-gradient(45deg, rgba(43, 38, 34, 0.045) 0 8px, transparent 8px 16px);
+}
+[data-theme="handdrawn"] .mirror-stage .placeholder { color: var(--ink); }
+[data-theme="handdrawn"] .mirror-scanlines {
+  background: repeating-linear-gradient(0deg, rgba(43, 38, 34, 0.07) 0 1px, transparent 1px 5px);
+  mix-blend-mode: normal;
+}
+[data-theme="handdrawn"] .mirror-watermark {
+  background: rgba(255, 253, 247, 0.94); border: 1.5px solid var(--ink); color: var(--ink); font-weight: 700;
+  box-shadow: 2px 2px 0 rgba(43, 38, 34, 0.22);
+}
 
 .workspace-stage {
   position: relative; border: 1px solid var(--line); border-radius: var(--radius-lg);
@@ -301,6 +502,13 @@ body.booting, body.booting *, body.booting *::before, body.booting *::after {
 .task-row .state.progress { color: var(--accent-warm); }
 .task-row .title { flex: 1; font-size: 13px; }
 .task-row span:last-child { font-size: 11px; color: var(--faint); }
+/* 手绘：任务页油墨虚线分隔 + 手写标题（数据来自 taskService，样式只做观感） */
+[data-theme="handdrawn"] .task-row { border-bottom: 1.5px dashed rgba(43, 38, 34, 0.32); }
+[data-theme="handdrawn"] .task-row .title { font-family: var(--font-display); }
+[data-theme="handdrawn"] .task-empty {
+  color: var(--muted); background: rgba(255, 253, 247, 0.7);
+  border: 1.5px dashed var(--ink); border-radius: var(--radius-md); padding: 12px 14px;
+}
 
 /* ── 人物全 bleed 背景层（最初前端 avatar-cloud 的做法） ── */
 /* 贴右全高、左缘 mask 淡入背景；装饰层不拦截输入 */
@@ -391,6 +599,11 @@ body.booting, body.booting *, body.booting *::before, body.booting *::after {
 }
 .subtabs button[aria-pressed="true"] { background: rgba(255, 255, 255, 0.1); color: var(--text); }
 .modal .actions { display: flex; justify-content: flex-end; gap: 10px; margin-top: 20px; }
+/* 设置弹层键盘焦点圈（B-U-08）；Esc 关闭在 App.vue 全局监听实现 */
+.modal :is(button, input, select, textarea):focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+[data-theme="handdrawn"] .modal :is(button, input, select, textarea):focus-visible { outline: 2px dashed var(--accent); }
+/* 提醒浮层的 aria-live 容器常驻 DOM、零高度，不参与布局（B-U-10） */
+.reminder-live-region { position: relative; }
 
 /* ── 学习/插件面板的通用收敛 ─────────────────────────── */
 .screen-body > * { min-height: 0; }
@@ -416,18 +629,28 @@ body.booting, body.booting *, body.booting *::before, body.booting *::after {
   outline: 1px dashed rgba(43, 38, 34, 0.28); outline-offset: -8px;
 }
 [data-theme="handdrawn"] .screen-pane::before { display: none; }
-[data-theme="handdrawn"] .screen-pane::after { /* 和纸胶带·红 */
-  content: ""; position: absolute; top: 10px; right: 24px; z-index: 6;
+[data-theme="handdrawn"] .screen-pane::after { /* 和纸胶带·红：压在上缘中央，不再压住页签/控制条（B-U-03） */
+  content: ""; position: absolute; top: -12px; left: 50%; right: auto; z-index: 6;
   width: 92px; height: 24px; pointer-events: none;
   background:
     repeating-linear-gradient(45deg, rgba(255, 255, 255, 0.32) 0 7px, transparent 7px 14px),
     rgba(232, 84, 63, 0.4);
   clip-path: polygon(3% 0, 97% 0, 100% 50%, 97% 100%, 3% 100%, 0 50%);
-  transform: rotate(-4deg);
+  transform: translateX(-50%) rotate(-4deg);
 }
-/* 页签：油墨分隔线；选中=加粗 + 手绘波浪线 */
+/* 页签：油墨分隔线；选中=加粗 + 手绘波浪线；页签文字走手绘字体 */
 [data-theme="handdrawn"] .screen-tabs { border-bottom: 2px solid var(--ink); }
-[data-theme="handdrawn"] .screen-tabs button { color: var(--faint); }
+[data-theme="handdrawn"] .screen-tabs button { color: var(--faint); font-family: var(--font-display); font-size: 14px; letter-spacing: 0.01em; }
+/* 手绘：拨杆贴纸化（油墨框 + 硬投影），滑块是红色马克笔 */
+[data-theme="handdrawn"] .monitor-bezel { box-shadow: none; }
+[data-theme="handdrawn"] .monitor-led { border: 1px solid var(--ink); }
+[data-theme="handdrawn"] .theme-lever, [data-theme="handdrawn"] .view-toggle {
+  background: rgba(255, 253, 247, 0.95); border: 1.5px solid var(--ink);
+  box-shadow: 2px 2px 0 rgba(43, 38, 34, 0.22);
+}
+[data-theme="handdrawn"] .theme-lever .tl-knob { background: rgba(232, 84, 63, 0.3); box-shadow: none; }
+[data-theme="handdrawn"] .view-toggle button[aria-pressed="true"] { background: rgba(232, 84, 63, 0.16); }
+[data-theme="handdrawn"] .monitor-brand { color: var(--faint); }
 [data-theme="handdrawn"] .screen-tabs button[aria-selected="true"] {
   color: var(--accent); font-weight: 700; border-bottom-color: transparent;
   background: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='42' height='7'%3E%3Cpath d='M2 4 Q 7 1.5 12 4 T 22 4 T 32 4 T 41 4' stroke='%23e8543f' stroke-width='2.2' fill='none' stroke-linecap='round'/%3E%3C/svg%3E") bottom 4px center / 42px 7px no-repeat;
@@ -456,6 +679,7 @@ body.booting, body.booting *, body.booting *::before, body.booting *::after {
 [data-theme="handdrawn"] .msg .avatar {
   background: #fff; border: 1.5px solid var(--ink); color: var(--muted);
   box-shadow: 2px 2px 0 rgba(43, 38, 34, 0.2);
+  font-family: var(--font-display); font-weight: 700;
 }
 [data-theme="handdrawn"] .msg.role-assistant .avatar { color: var(--accent); border-color: var(--ink); }
 [data-theme="handdrawn"] .branch-bar select { background: #fff; border: 1.5px solid var(--ink); }
@@ -521,23 +745,39 @@ body.booting, body.booting *, body.booting *::before, body.booting *::after {
 }
 [data-theme="handdrawn"] .modal-mask { background: rgba(43, 38, 34, 0.32); backdrop-filter: none; }
 [data-theme="handdrawn"] .field input, [data-theme="handdrawn"] .field select, [data-theme="handdrawn"] .field textarea {
-  background: #fff; border: 1.5px solid var(--line);
+  background: #fff; border: 1.5px solid var(--ink); /* B-U-05：输入框描边统一为油墨色 */
+}
+[data-theme="handdrawn"] .field input:focus, [data-theme="handdrawn"] .field select:focus, [data-theme="handdrawn"] .field textarea:focus {
+  border-color: var(--accent);
 }
 [data-theme="handdrawn"] .subtabs { border: 1.5px solid var(--ink); }
 [data-theme="handdrawn"] .subtabs button[aria-pressed="true"] { background: rgba(232, 84, 63, 0.14); }
 [data-theme="handdrawn"] .scene-tag { color: rgba(43, 38, 34, 0.5); }
-/* 空对话：手绘涂鸦引导（ChatView 的 .chat-empty，写实主题不显示） */
-.chat-empty { display: none; }
-[data-theme="handdrawn"] .pane-scroll { position: relative; }
-[data-theme="handdrawn"] .chat-empty {
-  display: block; position: absolute; right: 7%; bottom: 118px;
-  text-align: center; pointer-events: none; transform: rotate(3deg);
+
+/* 角色漫画滤镜（G-UI-10）：手绘主题下给人物区叠半调网点 + 轻微描边感（纯 CSS，不改组件）。
+   中心（脸部）用 mask 留空，避免网点糊脸；multiply 让网点只压暗、不泛白。 */
+[data-theme="handdrawn"] .avatar-side > .scene-pane::after {
+  content: ""; position: absolute; inset: 0; z-index: 2; pointer-events: none;
+  background: radial-gradient(rgba(43, 38, 34, 0.16) 1.15px, transparent 1.5px);
+  background-size: 12px 12px;
+  -webkit-mask-image: radial-gradient(66% 58% at 56% 42%, transparent 34%, #000 78%);
+  mask-image: radial-gradient(66% 58% at 56% 42%, transparent 34%, #000 78%);
+  mix-blend-mode: multiply; opacity: 0.55;
 }
+[data-theme="handdrawn"] .avatar-side > .scene-pane canvas { filter: saturate(1.06) contrast(1.05); }
+/* 空对话引导（ChatView 的 .chat-empty）：两个主题都显示——写实给暗色涂鸦，手绘给油墨涂鸦。
+   之前写实主题 display:none，空对话只剩一片黑，显得空（G-UI-06）。 */
+.chat-empty {
+  display: block; position: absolute; right: 7%; bottom: 118px;
+  text-align: center; pointer-events: none; transform: rotate(3deg); opacity: 0.92;
+}
+.chat-empty svg { display: block; margin: 0 auto; stroke: var(--faint); }
+.chat-empty .doodle-note { margin: 4px 0 0; font-size: 15px; color: var(--muted); }
 [data-theme="handdrawn"] .chat-empty .doodle-note {
-  margin: 4px 0 0; font-weight: 700; font-size: 15px; color: var(--ink);
+  margin: 4px 0 0; font-family: var(--font-display); font-weight: 400; font-size: 17px; color: var(--ink);
   background: linear-gradient(transparent 62%, rgba(255, 210, 63, 0.6) 62%);
 }
-[data-theme="handdrawn"] .chat-empty svg { display: block; margin: 0 auto; }
+[data-theme="handdrawn"] .chat-empty svg { stroke: var(--ink); }
 
 button:focus-visible, textarea:focus-visible, input:focus-visible, select:focus-visible {
   outline: 1px solid var(--accent); outline-offset: 2px;
@@ -1010,17 +1250,16 @@ button:focus-visible, textarea:focus-visible, input:focus-visible, select:focus-
 .save-ok { align-self: center; font-size: 12px; color: var(--ok); }
 .save-error { align-self: center; font-size: 12px; color: var(--err); max-width: 30ch; line-height: 1.5; }
 
-/* 笔记本署名：压在人物身上可读性差，加纸底与描边 */
+/* 笔记本署名（B-U-04 双定义合并）：定位/字号/颜色由 DeskLaptop 组件的 scoped 样式负责
+   （署名必须保持可见），这里只补「压在人物身上仍可读」的纸底与描边，不再重复定义位置。 */
 .laptop-credit {
-  position: absolute; right: 12px; bottom: 10px; z-index: 6;
-  max-width: 42ch; text-align: right; pointer-events: none;
-  font-size: 9.5px; line-height: 1.55; letter-spacing: 0.02em;
-  color: rgba(226, 232, 246, 0.62);
+  z-index: 6; max-width: 42ch; text-align: right; pointer-events: none;
+  line-height: 1.55; letter-spacing: 0.02em;
   background: rgba(8, 11, 18, 0.55); border-radius: 7px; padding: 4px 8px;
   backdrop-filter: blur(6px);
 }
 [data-theme="handdrawn"] .laptop-credit {
-  color: var(--muted); background: rgba(255, 253, 247, 0.9);
+  background: rgba(255, 253, 247, 0.9);
   border: 1px solid rgba(43, 38, 34, 0.35); backdrop-filter: none;
 }
 
@@ -1098,6 +1337,79 @@ button:focus-visible, textarea:focus-visible, input:focus-visible, select:focus-
 [data-theme="handdrawn"] .side-keylight::after { animation: speedlines 14s ease-in-out infinite; }
 @keyframes speedlines {
   50% { opacity: 0.72; }
+}
+
+/* ══════════════════════════════════════════════════════════════════
+   动效补全（G-UI-07）
+   ══════════════════════════════════════════════════════════════════ */
+/* 设置弹层 scale+fade 入场/退场（Transition 包在 SettingsModal 外，见 App.vue） */
+.modal-enter-active, .modal-leave-active { transition: opacity 0.22s ease; }
+.modal-enter-from, .modal-leave-to { opacity: 0; }
+.modal-enter-active .modal { animation: modal-pop 0.26s cubic-bezier(0.2, 1.25, 0.4, 1); }
+.modal-leave-active .modal { animation: modal-pop-out 0.18s ease forwards; }
+@keyframes modal-pop { from { opacity: 0; transform: scale(0.94) translateY(10px); } to { opacity: 1; transform: none; } }
+@keyframes modal-pop-out { from { opacity: 1; transform: none; } to { opacity: 0; transform: scale(0.96) translateY(8px); } }
+
+/* 主题切换整页 crossfade（View Transitions；不支持的 WebView 直切，无动画降级） */
+::view-transition-old(root), ::view-transition-new(root) {
+  animation-duration: 0.3s; animation-timing-function: ease;
+}
+
+/* 市场/记忆：按钮与列表 hover 手感 */
+.market-list li, .memory-list li { transition: background 0.18s, transform 0.18s, box-shadow 0.18s; }
+.market-list li:hover, .memory-list li:hover { background: rgba(255, 255, 255, 0.06); transform: translateX(2px); }
+[data-theme="handdrawn"] .market-list li:hover, [data-theme="handdrawn"] .memory-list li:hover {
+  background: #fff; transform: translate(-1px, -1px); box-shadow: 4px 4px 0 rgba(43, 38, 34, 0.3);
+}
+.market-list li button, .memory-list li button { transition: color 0.16s, transform 0.16s; }
+.market-list li button:hover, .memory-list li button:hover { transform: translateX(2px); }
+
+/* 感知 / 统计 / MC 卡片入场 stagger */
+.mc-card, .pv-grid > * { animation: card-rise 0.36s cubic-bezier(0.22, 1, 0.36, 1) backwards; }
+.stat-card { animation: card-fade 0.4s ease backwards; }
+.pv-grid > *:nth-child(2), .mc-card:nth-child(2), .stat-card:nth-child(2) { animation-delay: 0.06s; }
+.pv-grid > *:nth-child(3), .mc-card:nth-child(3), .stat-card:nth-child(3) { animation-delay: 0.12s; }
+.pv-grid > *:nth-child(4), .mc-card:nth-child(4) { animation-delay: 0.18s; }
+@keyframes card-rise { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: none; } }
+@keyframes card-fade { from { opacity: 0; } to { opacity: 1; } }
+
+/* 加载骨架微光（HA 连接中；.skeleton 为通用钩子） */
+.skeleton, .pv-status-pill.st-connecting { position: relative; overflow: hidden; }
+.skeleton::after, .pv-status-pill.st-connecting::after {
+  content: ""; position: absolute; inset: 0; pointer-events: none;
+  background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.2), transparent);
+  animation: shimmer 1.4s linear infinite;
+}
+@keyframes shimmer { from { transform: translateX(-100%); } to { transform: translateX(100%); } }
+
+/* 消息工具条：hover 位移提示可点（复制反馈前台已做，不重复） */
+.msg .tools { transition: opacity 0.18s, transform 0.18s; transform: translateY(2px); }
+.msg:hover .tools, .msg .tools:focus-within { transform: none; }
+.msg .tools button { transition: color 0.16s, transform 0.16s; }
+.msg .tools button:hover { transform: translateX(1.5px); }
+/* 触摸/无 hover 设备：工具条常显（B-U-07） */
+@media (hover: none) {
+  .msg .tools { opacity: 1; transform: none; }
+}
+
+/* ── 窄窗：右侧场景折叠为窄条，而不是只隐藏笔记本（G-UI-09 / UI 合同 §1.1.4） ── */
+@media (max-width: 1280px) {
+  .topbar { padding: 14px 16px 6px; }
+  .stage { padding: 8px 0 112px 14px; }
+  .stage > .screen-pane { margin-right: 24vw; }
+  .avatar-side > .scene-pane { width: 24%; }
+  .side-keylight { width: 24%; }
+  .monitor-stand { left: calc(50% - 12vw + 7px); width: 132px; height: 40px; bottom: 70px; }
+  .scene-status { top: 80px; right: 12px; font-size: 11px; padding: 6px 12px; }
+  .monitor-brand { display: none; }
+  .trinket-sticker { left: 14px; bottom: 22px; }
+  .trinket-note { right: 14px; bottom: 84px; }
+}
+
+/* ── 减少动态效果：<html class="reduce-motion">（store 已切换）停掉非必要动画；
+      状态色/文案等可见性不依赖动画，故仍完整可读 ── */
+.reduce-motion *, .reduce-motion *::before, .reduce-motion *::after {
+  animation: none !important; transition: none !important;
 }
 
 @media (prefers-reduced-motion: reduce) {

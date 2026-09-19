@@ -207,7 +207,8 @@ function heatTitle(cell: HeatCell): string {
 .heat-wrap { overflow-x: auto; }
 .heat-grid { display: flex; gap: 3px; min-width: max-content; }
 .heat-col { display: flex; flex-direction: column; gap: 3px; }
-.heat-cell { width: 11px; height: 11px; border-radius: 2.5px; display: inline-block; background: rgba(255, 255, 255, 0.06); }
+/* 空态格子用 --line：写实是极淡白、手绘是可见的墨灰，两个主题都看得见（B-U-01）。 */
+.heat-cell { width: 11px; height: 11px; border-radius: 2.5px; display: inline-block; background: var(--line); }
 .heat-cell.lv1 { background: color-mix(in srgb, var(--ok) 32%, transparent); }
 .heat-cell.lv2 { background: color-mix(in srgb, var(--ok) 55%, transparent); }
 .heat-cell.lv3 { background: color-mix(in srgb, var(--ok) 78%, transparent); }
@@ -219,4 +220,47 @@ function heatTitle(cell: HeatCell): string {
 .stat-table td { padding: 7px 6px; border-top: 1px solid var(--line); color: var(--muted); }
 .stat-table .mono { font-family: var(--font-mono); font-size: 11px; }
 .stat-table .est { margin-left: 6px; font-size: 9px; color: var(--accent-warm); border: 1px solid currentColor; border-radius: 4px; padding: 0 3px; }
+
+/* ── 手绘漫画主题：油墨卡 + 硬投影 + 手绘曲线（G-UI-02） ──
+   选择器带 data-theme 前缀 + scoped 属性，特异性高于基础规则，双主题互不干扰。 */
+[data-theme="handdrawn"] .stat-card {
+  background: #fff; border: 1.5px solid var(--ink); color: var(--ink);
+  border-radius: var(--radius-md);
+  box-shadow: 3px 3px 0 rgba(43, 38, 34, 0.22);
+}
+[data-theme="handdrawn"] .stat-card:nth-child(1) { transform: rotate(-0.6deg); }
+[data-theme="handdrawn"] .stat-card:nth-child(2) { transform: rotate(0.4deg); }
+[data-theme="handdrawn"] .stat-card:nth-child(3) { transform: rotate(-0.3deg); }
+[data-theme="handdrawn"] .stat-card .k { color: var(--faint); }
+[data-theme="handdrawn"] .stat-card strong { color: var(--accent); }
+[data-theme="handdrawn"] .stat-card .sub { color: var(--muted); }
+[data-theme="handdrawn"] .stat-note { color: var(--muted); }
+[data-theme="handdrawn"] .stat-h {
+  color: var(--ink); font-family: var(--font-display); font-weight: 400;
+  border-bottom: 1.5px dashed rgba(43, 38, 34, 0.35); padding-bottom: 5px;
+}
+[data-theme="handdrawn"] .stat-chart {
+  background: #fff; border: 1.5px solid var(--ink); border-radius: var(--radius-md);
+  padding: 10px 12px 4px; box-shadow: 3px 3px 0 rgba(43, 38, 34, 0.16);
+}
+[data-theme="handdrawn"] .stat-chart .grid { stroke: rgba(43, 38, 34, 0.18); stroke-dasharray: 3 4; }
+[data-theme="handdrawn"] .stat-chart .area { fill: rgba(232, 84, 63, 0.12); }
+[data-theme="handdrawn"] .stat-chart .line-prompt { stroke: var(--accent); stroke-width: 2.4; }
+[data-theme="handdrawn"] .stat-chart .line-completion { stroke: #0e9aa8; stroke-width: 1.8; }
+[data-theme="handdrawn"] .stat-chart .dot { fill: var(--accent); stroke: #fff; stroke-width: 1; }
+[data-theme="handdrawn"] .stat-chart .axis { fill: var(--muted); }
+[data-theme="handdrawn"] .legend { color: var(--muted); }
+[data-theme="handdrawn"] .lg-completion { background: #0e9aa8; }
+[data-theme="handdrawn"] .heat-cell { border: 1px solid rgba(43, 38, 34, 0.28); border-radius: 3px 2px 3px 2px; }
+[data-theme="handdrawn"] .heat-cell.lv1 { background: color-mix(in srgb, var(--ok) 30%, #fff); }
+[data-theme="handdrawn"] .heat-cell.lv2 { background: color-mix(in srgb, var(--ok) 55%, #fff); }
+[data-theme="handdrawn"] .heat-cell.lv3 { background: color-mix(in srgb, var(--ok) 78%, #fff); }
+[data-theme="handdrawn"] .heat-cell.lv4 { background: var(--ok); }
+[data-theme="handdrawn"] .stat-empty {
+  color: var(--muted); background: rgba(255, 253, 247, 0.7);
+  border: 1.5px dashed var(--ink); border-radius: var(--radius-md); padding: 12px 14px;
+}
+[data-theme="handdrawn"] .stat-table th { color: var(--faint); }
+[data-theme="handdrawn"] .stat-table td { border-top: 1.5px solid rgba(43, 38, 34, 0.22); color: var(--ink); }
+[data-theme="handdrawn"] .stat-table .est { color: var(--accent); }
 </style>

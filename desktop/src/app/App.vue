@@ -1,8 +1,9 @@
 <script setup lang="ts">
 // 布局以项目最初前端（s2s/demo）为基座：人物全 bleed 背景层贴右 + 内容层浮于其上；
-// 在其上加：左侧电脑屏幕（ScreenPane）、中央语音球（VoiceOrb）、底部胶囊导航、桌上笔记本。
-import { computed, onMounted } from 'vue';
-import { store, initStore, setNav, setTheme, voiceStateLabel, llmBadge } from './store';
+// 在其上加：左侧电脑屏幕（ScreenPane）、底部胶囊导航、桌上笔记本。
+// 注意：中央语音球（VoiceOrb）已按负责人要求移除，语音入口 = 输入框「语音」按钮 + 顶栏状态。
+import { computed, onBeforeUnmount, onMounted, ref } from 'vue';
+import { store, initStore, setNav, setTheme, closeSettings, voiceStateLabel, llmBadge } from './store';
 import ThemeSwitch from '../ui/ThemeSwitch.vue';
 import NavPill from '../ui/NavPill.vue';
 import ScreenPane from '../ui/ScreenPane.vue';
@@ -12,12 +13,52 @@ import SceneCanvas from '../ui/SceneCanvas.vue';
 import DeskLaptop from '../ui/DeskLaptop.vue';
 import SettingsModal from '../ui/SettingsModal.vue';
 import ReminderToast from '../ui/ReminderToast.vue';
+import SceneStatusTag from '../ui/decor/SceneStatusTag.vue';
+import DeskTrinkets from '../ui/decor/DeskTrinkets.vue';
 
 const isMock = computed(() => store.providerSettings.kind === 'mock');
 
+/** 顶栏中段实时时钟（G-UI-06）：让顶栏中段有内容，不再空着。 */
+const clock = ref('');
+let clockTimer: ReturnType<typeof setInterval> | null = null;
+function tickClock() {
+  clock.value = new Date().toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+}
+
 function goChat() { setNav('chat'); }
 
-onMounted(() => { void initStore(); });
+/**
+ * 主题切换全页 crossfade（G-UI-07）：有 View Transitions 就用它做整页交叉淡入，
+ * 没有（或系统要求减少动效）就直切——降级无动画，功能不受影响。
+ */
+function changeTheme(theme: 'realistic' | 'handdrawn') {
+  const doc = document as Document & { startViewTransition?: (cb: () => void) => void };
+  const reduce = document.documentElement.classList.contains('reduce-motion');
+  if (typeof doc.startViewTransition === 'function' && !reduce) {
+    doc.startViewTransition(() => setTheme(theme));
+  } else {
+    setTheme(theme);
+  }
+}
+
+/** Esc 关闭设置弹层（B-U-08）：在 App 层监听，不改 SettingsModal 本体。 */
+function onGlobalKeydown(e: KeyboardEvent) {
+  if (e.key === 'Escape' && store.settingsOpen) {
+    e.preventDefault();
+    closeSettings();
+  }
+}
+
+onMounted(() => {
+  tickClock();
+  clockTimer = setInterval(tickClock, 1000);
+  window.addEventListener('keydown', onGlobalKeydown);
+  void initStore();
+});
+onBeforeUnmount(() => {
+  if (clockTimer !== null) clearInterval(clockTimer);
+  window.removeEventListener('keydown', onGlobalKeydown);
+});
 </script>
 
 <template>
@@ -35,6 +76,9 @@ onMounted(() => { void initStore(); });
       <DeskLaptop />
     </div>
 
+    <!-- 人物区状态浮签：她在做什么（装饰 HUD，不拦输入） -->
+    <SceneStatusTag />
+
     <header class="topbar">
       <div class="brand">
         <div class="ident">
@@ -46,11 +90,24 @@ onMounted(() => { void initStore(); });
           <div class="ident-meta">链路&nbsp;&nbsp;麦克风 → VAD → 识别 → 对话 → 合成 → 数字人</div>
         </div>
       </div>
+
+      <!-- 顶栏中段：链路状态 + 实时时钟 + 装饰分隔（G-UI-06，纯展示） -->
+      <div class="topbar-mid" aria-hidden="true">
+        <span class="tm-rule" />
+        <div class="tm-readout">
+          <span class="tm-status" :class="{ offline: !!store.initError, mock: isMock }">
+            <span class="dot" />{{ store.initError ? '链路离线' : isMock ? '演示链路' : '链路在线' }}
+          </span>
+          <span class="tm-time">{{ clock }}</span>
+        </div>
+        <span class="tm-rule" />
+      </div>
+
       <div class="topbar-right">
         <span class="cloud-badge" :class="{ mock: isMock }" :title="'供应商：' + store.providerSettings.kind">
           <span class="dot" />{{ llmBadge }}
         </span>
-        <ThemeSwitch :model-value="store.theme" @update:model-value="setTheme" />
+        <ThemeSwitch :model-value="store.theme" @update:model-value="changeTheme" />
         <span class="voice-state" :class="'st-' + store.voiceState">
           <span class="dot" />{{ voiceStateLabel() }}
         </span>
@@ -65,12 +122,20 @@ onMounted(() => { void initStore(); });
 
     <main class="stage">
       <ScreenPane />
+      <!-- 显示器底座（纯装饰，位于屏幕面板下方、胶囊导航上方） -->
+      <span class="monitor-stand" aria-hidden="true" />
     </main>
 
     <footer class="statusbar">本地优先 · STT / LLM / TTS 均为可配置的 OpenAI 兼容接口 · 密钥仅存系统凭据仓</footer>
 
+    <!-- 桌面小物：底部两侧的漫画贴纸/便签（装饰，不拦输入） -->
+    <DeskTrinkets />
+
     <NavPill :current="store.nav" @select="setNav" />
-    <SettingsModal v-if="store.settingsOpen" />
+    <!-- 设置弹层 scale+fade 入场/退场（G-UI-07）：Transition 包在组件外，不改 SettingsModal 本体 -->
+    <Transition name="modal">
+      <SettingsModal v-if="store.settingsOpen" />
+    </Transition>
     <ReminderToast />
   </div>
 </template>

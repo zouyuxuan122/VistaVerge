@@ -44,8 +44,21 @@ onBeforeUnmount(stop);
 
 <template>
   <div class="pane-scroll">
-    <span class="readonly-tag">只读镜像 · 画面不可操作，不作为 AI 执行平面</span>
-    <div class="mirror-stage">
+    <span class="readonly-tag">
+      <svg class="ro-icon" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <rect x="4" y="10" width="16" height="10" rx="2" /><path d="M8 10V7a4 4 0 0 1 8 0v3" />
+      </svg>
+      只读镜像 · 画面不可操作，不作为 AI 执行平面
+    </span>
+    <div class="mirror-stage" :class="{ 'is-live': !!stream }">
+      <!-- 只读语义视觉化：扫描线 + 水印（图标 + 文案，不依赖颜色） -->
+      <span class="mirror-scanlines" aria-hidden="true" />
+      <span class="mirror-watermark" aria-hidden="true">
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+          <rect x="4" y="10" width="16" height="10" rx="2" /><path d="M8 10V7a4 4 0 0 1 8 0v3" />
+        </svg>
+        只读镜像 · 不可操作
+      </span>
       <video v-if="stream" ref="videoEl" autoplay muted playsinline />
       <div v-else class="placeholder">
         {{ message || '这里显示你授权共享的屏幕/窗口画面。' }}<br />

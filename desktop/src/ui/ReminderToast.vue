@@ -17,14 +17,17 @@ function onToggleQuiet(enabled: boolean) {
 
 <template>
   <!-- 只在真的有提醒时浮出。HA 未配置的完整说明在「感知」页签里常驻，
-       不在每个页面都挂一张常驻浮卡（之前那张裸卡还占着布局高度）。 -->
-  <ReminderToast
-    v-if="perception.reminders.length > 0"
-    :reminders="perception.reminders"
-    :ha-status="perception.haStatus"
-    :blocked-reason="perception.haBlockedReason ?? ''"
-    :quiet-enabled="perception.quietEnabled"
-    :on-dismiss="onDismiss"
-    :on-toggle-quiet="onToggleQuiet"
-  />
+       不在每个页面都挂一张常驻浮卡（之前那张裸卡还占着布局高度）。
+       外层 aria-live 容器常驻 DOM（零高度），提醒出现时读屏才会播报（B-U-10）。 -->
+  <div class="reminder-live-region" aria-live="polite" aria-atomic="false">
+    <ReminderToast
+      v-if="perception.reminders.length > 0"
+      :reminders="perception.reminders"
+      :ha-status="perception.haStatus"
+      :blocked-reason="perception.haBlockedReason ?? ''"
+      :quiet-enabled="perception.quietEnabled"
+      :on-dismiss="onDismiss"
+      :on-toggle-quiet="onToggleQuiet"
+    />
+  </div>
 </template>

@@ -13,7 +13,9 @@ describe('导航与主题', () => {
   it('胶囊导航渲染五个入口并标记当前项，方向键切换', async () => {
     const wrapper = mount(NavPill, { props: { current: 'chat' } });
     const buttons = wrapper.findAll('button');
-    expect(buttons.map((b) => b.text())).toEqual(['💬对话', '📖学习', '🛠任务', '🧩插件', '⚙设置']);
+    // G-UI-10：emoji 换成内联 SVG 油墨图标，文字标签不变。
+    expect(buttons.map((b) => b.text())).toEqual(['对话', '学习', '任务', '插件', '设置']);
+    expect(buttons.every((b) => b.find('svg.glyph').exists())).toBe(true);
     expect(buttons[0].attributes('aria-current')).toBe('page');
     await wrapper.trigger('keydown', { key: 'ArrowRight' });
     expect(wrapper.emitted('select')?.[0]).toEqual(['study']);

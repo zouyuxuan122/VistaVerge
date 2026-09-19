@@ -13,11 +13,12 @@ interface WsEvent {
 }
 
 const SURFACE_ID = 'demo-surface-1';
+// 内联 SVG 油墨图标（G-UI-10）：线条走 currentColor，手绘/写实两主题都协调。
 const icons = [
-  { name: '浏览器', glyph: '🌐', left: 22, top: 42 },
-  { name: '文件夹', glyph: '📁', left: 22, top: 126 },
-  { name: '记事本', glyph: '📝', left: 22, top: 210 },
-  { name: '回收站', glyph: '🗑', left: 22, top: 294 },
+  { name: '浏览器', icon: '<circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3a15 15 0 0 1 0 18a15 15 0 0 1 0-18"/>', left: 22, top: 42 },
+  { name: '文件夹', icon: '<path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/>', left: 22, top: 126 },
+  { name: '记事本', icon: '<path d="M6 3h9l4 4v14a1 1 0 0 1-1 1H6a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1z"/><path d="M14 3v5h5M9 13h6M9 17h4"/>', left: 22, top: 210 },
+  { name: '回收站', icon: '<path d="M4 7h16M9 7V5a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2M6 7l1 13a1 1 0 0 0 1 1h8a1 1 0 0 0 1-1l1-13"/>', left: 22, top: 294 },
 ];
 
 /** 演示任务的计划步骤：面板里实时显示走到哪一步（不只是光标在动）。 */
@@ -123,7 +124,7 @@ onBeforeUnmount(() => {
         class="ws-icon"
         :style="{ left: icon.left + 'px', top: icon.top + 'px' }"
       >
-        <span class="glyph">{{ icon.glyph }}</span>{{ icon.name }}
+        <svg class="glyph" width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" v-html="icon.icon" />{{ icon.name }}
       </div>
 
       <!-- 任务计划窗：让「她在做什么」可见，而不是只有一个光标在动 -->
