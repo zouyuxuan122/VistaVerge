@@ -1,9 +1,8 @@
 // EXP-003 behavior tests for VoiceSession: the six-state streaming session
 // (idle/connecting/listening/user-speaking/processing/ai-speaking), GenerationGate
 // wiring, sentence-level TTS queueing, the playback ledger, bounded-queue
-// backpressure against the LLM stream, and barge-in interrupts (mic open during
-// processing aborts the turn and advances the generation; ai-speaking uses the
-// same 5-frame debounce as the batch engine).
+// backpressure against the LLM stream, and barge-in interrupts (processing 与 ai-speaking
+// 统一 5 帧去抖，打断帧回填进新 utterance).
 //
 // The real worklet port drives VAD (same rig style as engine-abort.test.ts);
 // LLM provider, STT, TTS and playback are injected fakes (no network, no audio).
@@ -514,7 +513,7 @@ describe('VoiceSession backpressure (bounded queue pauses the upstream)', () => 
 });
 
 describe('VoiceSession interrupts (barge-in)', () => {
-  it('mic open during processing aborts the turn, advances the generation and discards late STT', async () => {
+  it('mic open during processing uses the same 5-frame debounce, then aborts the turn and discards late STT', async () => {
     const rig = makeAudioRig();
     const provider = new FakeProvider();
     const session = new VoiceSession(SETTINGS, { provider, ...rig.deps });
@@ -525,6 +524,15 @@ describe('VoiceSession interrupts (barge-in)', () => {
     await settle();
     expect(session.generation).toBe(1);
 
+    // 去抖期：前 4 帧不打断（单帧噪声/咳嗽不应误杀生成中的回合）
+    for (let i = 0; i < 4; i += 1) {
+      feed(node, openFrame(), 0.5);
+    }
+    expect(session.currentState).toBe('processing');
+    expect(session.generation).toBe(1);
+    expect(rig.transcribeCalls[0].signal.aborted).toBe(false);
+
+    // 第 5 帧触发打断；触发帧回填进新 utterance
     feed(node, openFrame(), 0.5);
     expect(session.currentState).toBe('user-speaking');
     expect(session.generation).toBe(2);
@@ -728,6 +736,109 @@ describe('VoiceSession ledger exposure', () => {
     await settle();
     expect(session.ledger).not.toBe(first);
     expect(session.ledger.playedThrough()).toBe(0);
+    await session.stop();
+  });
+});
+
+describe('VoiceSession respond gate & proactive speak (FEATURE-01)', () => {
+  it('respondMode=name：不含唤醒名的语音只记录不回复（user-turn-record，无 LLM 调用）', async () => {
+    const rig = makeAudioRig();
+    const provider = new FakeProvider();
+    const session = new VoiceSession(
+      { ...SETTINGS, respondMode: 'name', wakeName: '小薇' },
+      { provider, ...rig.deps },
+    );
+    const events = recorder(session, ['user-turn', 'user-turn-record']);
+    const node = await startSession(session);
+
+    speakOnce(node);
+    await settle();
+    rig.sttGates[0].resolve('今天天气怎么样');
+    await settle();
+    expect(events.filter((e) => e.type === 'user-turn-record')).toEqual([
+      { type: 'user-turn-record', detail: { text: '今天天气怎么样', generation: 1 } },
+    ]);
+    expect(events.filter((e) => e.type === 'user-turn')).toEqual([]);
+    expect(provider.streamCalls).toHaveLength(0);
+    expect(session.currentState).toBe('listening');
+    await session.stop();
+  });
+
+  it('respondMode=name：含唤醒名正常进入回复链路', async () => {
+    const rig = makeAudioRig();
+    const provider = new FakeProvider();
+    const session = new VoiceSession(
+      { ...SETTINGS, respondMode: 'name', wakeName: '小薇' },
+      { provider, ...rig.deps },
+    );
+    const events = recorder(session, ['user-turn', 'reply']);
+    const node = await startSession(session);
+
+    speakOnce(node);
+    await settle();
+    rig.sttGates[0].resolve('小薇，今天天气怎么样');
+    await settle();
+    expect(events.filter((e) => e.type === 'user-turn')).toHaveLength(1);
+    expect(provider.streamCalls).toHaveLength(1);
+    provider.push({ delta: '晴天哦。' });
+    provider.finish();
+    await settle();
+    rig.synGates[0].resolve();
+    await settle();
+    rig.playGates[0].resolve();
+    await settle();
+    expect(events.filter((e) => e.type === 'reply')).toHaveLength(1);
+    await session.stop();
+  });
+
+  it('respondMode=smart：respondGate 判 record 只录入；判 respond 正常回复', async () => {
+    const rig = makeAudioRig();
+    const provider = new FakeProvider();
+    const verdicts: Record<string, 'respond' | 'record'> = { 背景声: 'record', 问我问题: 'respond' };
+    const session = new VoiceSession(
+      { ...SETTINGS, respondMode: 'smart' },
+      { provider, ...rig.deps, respondGate: (text) => verdicts[text] ?? 'uncertain' },
+    );
+    const events = recorder(session, ['user-turn', 'user-turn-record']);
+    const node = await startSession(session);
+
+    speakOnce(node);
+    await settle();
+    rig.sttGates[0].resolve('背景声');
+    await settle();
+    expect(events.filter((e) => e.type === 'user-turn-record')).toHaveLength(1);
+    expect(provider.streamCalls).toHaveLength(0);
+
+    speakOnce(node);
+    await settle();
+    rig.sttGates[1].resolve('问我问题');
+    await settle();
+    expect(events.filter((e) => e.type === 'user-turn')).toHaveLength(1);
+    expect(provider.streamCalls).toHaveLength(1);
+    await session.stop();
+  });
+
+  it('speak() 仅在 listening 开口；忙时不开口', async () => {
+    const rig = makeAudioRig();
+    const provider = new FakeProvider();
+    const session = new VoiceSession(SETTINGS, { provider, ...rig.deps });
+    const node = await startSession(session);
+
+    session.speak('该喝水了。');
+    await settle();
+    expect(rig.synthesizeCalls.map((c) => c.text)).toEqual(['该喝水了。']);
+    rig.synGates[0].resolve();
+    await settle();
+    rig.playGates[0].resolve();
+    await settle();
+    expect(session.currentState).toBe('listening');
+
+    // 用户开讲进入 processing 后，主动播报不开口（保守，不抢话）
+    speakOnce(node);
+    await settle();
+    expect(session.currentState).toBe('processing');
+    session.speak('插队的话。');
+    expect(rig.synthesizeCalls).toHaveLength(1);
     await session.stop();
   });
 });

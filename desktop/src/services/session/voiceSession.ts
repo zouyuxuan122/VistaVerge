@@ -2,8 +2,8 @@
 // capability negotiation. The batch engine (desktop/src/engine.ts) stays
 // untouched as the explicit fallback; this session reuses its proven parts —
 // the mic AudioWorklet capture, the batch STT/TTS HTTP shapes (services/stt,
-// services/tts) and the same barge-in feel (5 voiced frames ≈ 200 ms during
-// ai-speaking; during processing a single mic-open interrupts immediately).
+// services/tts) and the same barge-in feel (连续有声帧去抖 ≈200 ms，
+// processing 与 ai-speaking 统一阈值，打断后触发帧回填进新 utterance)。
 //
 // Chain: VAD turn → batch STT → LlmProvider.streamChat (SSE deltas) →
 // takeCompleteSentences → bounded TtsQueue (backpressure pauses the delta
@@ -67,6 +67,15 @@ export interface VoiceSessionSettings {
   maxSentenceChars?: number;
   /** Bounded TTS queue capacity, queued + playing (default 4). */
   queueCapacity?: number;
+  /**
+   * 回应门控（COST-001）：all=每段语音都回；smart=由 respondGate 判定，
+   * 判 record 的只录入不回复；name=仅当转写含唤醒名才回。默认 all（旧行为）。
+   */
+  respondMode?: 'all' | 'smart' | 'name';
+  /** respondMode=name 时的唤醒名（不填回退到内置默认名）。 */
+  wakeName?: string;
+  /** 打断灵敏度：连续有声帧数（≈40ms/帧），processing 与 ai-speaking 统一。默认 5。 */
+  bargeInFrames?: number;
 }
 
 export interface VoiceSessionDeps {
@@ -78,6 +87,15 @@ export interface VoiceSessionDeps {
   synthesize?: (text: string, signal: AbortSignal) => Promise<Int16Array>;
   /** Defaults to AudioContext playback (settings.ttsSampleRate). */
   play?: (pcm: Int16Array, signal: AbortSignal) => Promise<void>;
+  /**
+   * 统一历史来源（B-C-02）：提供后语音回合从宿主会话读历史，
+   * 文本侧编辑/重试/切分支对语音立即生效；不提供则用会话内私有历史（测试/独立使用）。
+   */
+  getHistory?: () => { role: 'user' | 'assistant'; content: string }[];
+  /** 按本轮用户文本组装系统提示（记忆/人设注入）；不提供则用静态 instructions。 */
+  systemForTurn?: (userText: string) => string;
+  /** smart 门控判定：respond=正常回复；record=只录入；uncertain=拿不准（按 respond 处理，效果优先）。 */
+  respondGate?: (transcript: string) => 'respond' | 'record' | 'uncertain';
 }
 
 interface Turn {
@@ -86,8 +104,10 @@ interface Turn {
 }
 
 const CHUNK_MS = 40;
-const BARGE_IN_FRAMES = 5; // consecutive voiced frames (≈200 ms), engine parity
+const DEFAULT_BARGE_IN_FRAMES = 5; // consecutive voiced frames (≈200 ms), engine parity
 const GATE_OFF_DB = -66;
+/** smart 门控的内置名字表（用户未配置唤醒名时的回退）。 */
+const DEFAULT_WAKE_NAMES = ['vistaverge', '小v', '微微'];
 
 function abortError(): Error {
   return new DOMException('This operation was aborted', 'AbortError');
@@ -95,6 +115,7 @@ function abortError(): Error {
 
 export class VoiceSession extends EventTarget {
   #settings: VoiceSessionSettings;
+  #deps: VoiceSessionDeps;
   #provider: LlmProvider;
   #transcribe: NonNullable<VoiceSessionDeps['transcribe']>;
   #synthesize: NonNullable<VoiceSessionDeps['synthesize']>;
@@ -128,6 +149,7 @@ export class VoiceSession extends EventTarget {
   constructor(settings: VoiceSessionSettings, deps: VoiceSessionDeps = {}) {
     super();
     this.#settings = settings;
+    this.#deps = deps;
     this.#provider = deps.provider ?? createOpenAiCompatProvider();
     this.#transcribe =
       deps.transcribe ??
@@ -279,6 +301,39 @@ export class VoiceSession extends EventTarget {
     this.dispatchEvent(new CustomEvent('interrupt', { detail: { generation: this.#gate.current } }));
   }
 
+  /**
+   * 主动播报（VOICE §1.4 主动插话的出口）：只在 listening 空闲时开口，
+   * 其他状态直接放弃（保守默认，不抢用户的话）。文本按句进 TTS 队列，
+   * 打断语义与普通回合一致（interrupt 可中止）。
+   */
+  speak(text: string): void {
+    const clean = text.trim();
+    if (!clean || this.#state !== 'listening') return;
+    const generation = this.#gate.advance();
+    const turn: Turn = { controller: new AbortController(), generation };
+    this.#turn = turn;
+    this.#ledger = new PlaybackLedger();
+    this.#ledgerGeneration = generation;
+    this.#sentenceIndex = 0;
+    this.#pendingIndices = [];
+    this.#setState('processing');
+    const take = takeCompleteSentences(clean, { maxChars: this.#settings.maxSentenceChars });
+    for (const sentence of take.sentences) this.#enqueueSentence(sentence, generation);
+    if (take.rest.trim().length > 0) this.#enqueueSentence(take.rest, generation);
+    void this.#queue
+      .whenDrained()
+      .catch(() => {})
+      .then(() => {
+        if (this.#turn?.generation === generation) this.#turn = null;
+        if (
+          this.#gate.accepts(generation) &&
+          (this.#state === 'processing' || this.#state === 'ai-speaking')
+        ) {
+          this.#setState('listening');
+        }
+      });
+  }
+
   // ── mic → noise gate + energy VAD (engine-parity feel) ─────────────────────
 
   #onChunk(pcm: Float32Array, rms: number): void {
@@ -301,19 +356,20 @@ export class VoiceSession extends EventTarget {
     this.#prepad.push(i16);
     if (this.#prepad.length > padFrames) this.#prepad.shift();
 
-    if (this.#state === 'ai-speaking') {
+    // 打断判定：processing 与 ai-speaking 用同一连续帧去抖（B-C-03：processing
+    // 原先单帧即断，咳嗽/环境声会误杀正在生成的回合）。
+    if (this.#state === 'ai-speaking' || this.#state === 'processing') {
       this.#voiceFrames = open ? this.#voiceFrames + 1 : 0;
-      if (this.#voiceFrames >= BARGE_IN_FRAMES) {
+      if (this.#voiceFrames >= this.#bargeInFrames()) {
+        // B-C-01：interrupt() 会 resetVad 清空 prepad，触发打断的这段开头（含当前帧，
+        // 已在上方 push 进 prepad）必须在打断后补回，否则新一句话的 onset ~0.5s 被吞掉。
+        const seed = [...this.#prepad];
         this.interrupt();
+        this.#prepad = seed;
+        // 落到下面 listening 分支，用补回的 prepad 开启新 utterance
       } else {
         return;
       }
-    }
-
-    if (this.#state === 'processing') {
-      // mic open during processing interrupts the turn immediately (EXP-003)
-      if (open) this.interrupt();
-      else return;
     }
 
     if (this.#state === 'user-speaking') {
@@ -328,6 +384,44 @@ export class VoiceSession extends EventTarget {
       this.#silenceMs = 0;
       this.#setState('user-speaking');
     }
+  }
+
+  #bargeInFrames(): number {
+    const frames = this.#settings.bargeInFrames ?? DEFAULT_BARGE_IN_FRAMES;
+    return Math.max(1, Math.min(25, Math.floor(frames)));
+  }
+
+  /** 回应门控：all 总是回；name 仅含唤醒名；smart 交给 respondGate，缺省/拿不准都回（效果优先）。 */
+  #decideRespond(transcript: string): 'respond' | 'record' {
+    const mode = this.#settings.respondMode ?? 'all';
+    if (mode === 'all') return 'respond';
+    if (mode === 'name') {
+      const names = this.#settings.wakeName?.trim()
+        ? [this.#settings.wakeName.trim().toLowerCase()]
+        : DEFAULT_WAKE_NAMES;
+      const lower = transcript.toLowerCase();
+      return names.some((name) => lower.includes(name)) ? 'respond' : 'record';
+    }
+    const verdict = this.#deps.respondGate?.(transcript) ?? 'respond';
+    return verdict === 'record' ? 'record' : 'respond';
+  }
+
+  /**
+   * 本轮携带的历史。宿主持史（getHistory）时以宿主为准：
+   * store 的 user-turn 监听会先把本轮用户文本写进会话，这里若末尾正是它就去掉，
+   * 否则模型会收到 [user X, user X] 重复输入。
+   */
+  #turnHistory(userText: string): ChatMessage[] {
+    const keep = this.#historyTurnsKeep();
+    if (keep === 0) return [];
+    const external = this.#deps.getHistory?.();
+    if (external) {
+      let hist = external;
+      const last = hist.at(-1);
+      if (last && last.role === 'user' && last.content === userText) hist = hist.slice(0, -1);
+      return hist.slice(-keep).map((m) => ({ role: m.role, content: m.content }));
+    }
+    return this.#history.slice(-keep).map((m) => ({ role: m.role, content: m.content }));
   }
 
   #appendUtterance(i16: Int16Array, open: boolean, closed: boolean): void {
@@ -401,14 +495,25 @@ export class VoiceSession extends EventTarget {
         this.#setState('listening');
         return;
       }
+
+      // 选择性回应门控（COST-001）：判 record 的语音只录入、不回复，
+      // 状态直接回 listening——不发起 LLM/TTS，token 零消耗。
+      if (this.#decideRespond(userText) === 'record') {
+        this.dispatchEvent(
+          new CustomEvent('user-turn-record', { detail: { text: userText, generation } }),
+        );
+        this.#setState('listening');
+        return;
+      }
+
       this.dispatchEvent(
         new CustomEvent('user-turn', { detail: { text: userText, generation } }),
       );
 
       const messages: ChatMessage[] = [
-        { role: 'system', content: this.#settings.instructions },
+        { role: 'system', content: this.#deps.systemForTurn?.(userText) ?? this.#settings.instructions },
         // historyTurns=0 必须表示「不带历史」：slice(-0) 等于 slice(0)，会返回整个数组。
-        ...(this.#historyTurnsKeep() === 0 ? [] : this.#history.slice(-this.#historyTurnsKeep())),
+        ...this.#turnHistory(userText),
         { role: 'user', content: userText },
       ];
       const args: StreamChatArgs = {
@@ -456,12 +561,15 @@ export class VoiceSession extends EventTarget {
       if (buffer.trim().length > 0) this.#enqueueSentence(buffer, generation);
       if (full.trim().length > 0) {
         this.dispatchEvent(new CustomEvent('reply', { detail: { text: full, generation } }));
-        const keep = this.#historyTurnsKeep();
-        if (keep === 0) {
-          this.#history = [];
-        } else {
-          this.#history.push({ role: 'user', content: userText }, { role: 'assistant', content: full });
-          if (this.#history.length > keep) this.#history = this.#history.slice(-keep);
+        // 私有历史只是 fallback：宿主持史（getHistory）时由宿主持久化（B-C-02）
+        if (!this.#deps.getHistory) {
+          const keep = this.#historyTurnsKeep();
+          if (keep === 0) {
+            this.#history = [];
+          } else {
+            this.#history.push({ role: 'user', content: userText }, { role: 'assistant', content: full });
+            if (this.#history.length > keep) this.#history = this.#history.slice(-keep);
+          }
         }
       }
 

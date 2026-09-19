@@ -7,6 +7,7 @@ import {
   listBranches,
   listMessages,
   retryFrom,
+  rollbackTo,
   type MessageRecord,
 } from '../../src/data/conversations';
 
@@ -59,46 +60,56 @@ describe('data/conversations：消息链与分支', () => {
     ).toThrow(/parent/);
   });
 
-  it('editMessage 从首条编辑：新分支含编辑消息+完整前缀副本，原分支不变', () => {
+  it('editMessage 从首条编辑：新分支止于编辑后的消息（不搬运旧回复），原分支不变', () => {
     const { convId, rootBranch, msgs } = chain();
-    const [m1, m2, m3, m4] = msgs;
+    const [m1] = msgs;
     const e = editMessage(m1!.id, 'A改');
 
     const branchMsgs = listMessages(e.branchId);
-    expect(branchMsgs).toHaveLength(4);
+    expect(branchMsgs).toHaveLength(1);
     expect(branchMsgs[0]).toMatchObject({ id: e.messageId, text: 'A改', edited: true, originId: m1!.id, parentId: null });
-    expect(branchMsgs[1]).toMatchObject({ text: 'B', edited: false, originId: m2!.id, parentId: e.messageId });
-    expect(branchMsgs[2]).toMatchObject({ text: 'C', originId: m3!.id });
-    expect(branchMsgs[3]).toMatchObject({ text: 'D', originId: m4!.id, parentId: branchMsgs[2]!.id });
 
-    // 原分支完全不变
+    // 原分支完全不变（旧回复留在原分支可回溯）
     expect(listMessages(rootBranch).map((m) => m.text)).toEqual(['A', 'B', 'C', 'D']);
     // 分支记录：父分支指向原分支，fork 点 = 被编辑消息的父（首条 → null）
     const branches = listBranches(convId);
     expect(branches).toHaveLength(2);
     const nb = branches.find((b) => b.id === e.branchId);
-    expect(nb).toMatchObject({ parentBranchId: rootBranch, forkMessageId: null, messageCount: 4 });
+    expect(nb).toMatchObject({ parentBranchId: rootBranch, forkMessageId: null, messageCount: 1 });
     // 活动分支切换到新分支
     expect(
       getDb().get('SELECT active_branch_id AS a FROM conversations WHERE id = ?', [convId])?.a,
     ).toBe(e.branchId);
   });
 
-  it('editMessage 从中间编辑：新分支=到父级为止的前缀+编辑消息；forkMessageId 指向断点', () => {
+  it('editMessage 从中间编辑：新分支=前缀+编辑消息；forkMessageId 指向断点', () => {
     const { convId, rootBranch, msgs } = chain();
     const [, m2] = msgs;
     const e = editMessage(m2!.id, 'B改');
 
     const branchMsgs = listMessages(e.branchId);
-    expect(branchMsgs).toHaveLength(4);
+    expect(branchMsgs).toHaveLength(2);
     expect(branchMsgs[0]).toMatchObject({ text: 'A', edited: false, originId: msgs[0]!.id, parentId: null });
     expect(branchMsgs[1]).toMatchObject({ text: 'B改', edited: true, originId: m2!.id, parentId: branchMsgs[0]!.id });
-    expect(branchMsgs[2]).toMatchObject({ text: 'C', originId: msgs[2]!.id, parentId: e.messageId });
-    expect(branchMsgs[3]).toMatchObject({ text: 'D', originId: msgs[3]!.id });
 
     const nb = listBranches(convId).find((b) => b.id === e.branchId);
-    expect(nb).toMatchObject({ parentBranchId: rootBranch, forkMessageId: msgs[0]!.id, messageCount: 4 });
+    expect(nb).toMatchObject({ parentBranchId: rootBranch, forkMessageId: msgs[0]!.id, messageCount: 2 });
     expect(listMessages(rootBranch)).toHaveLength(4);
+  });
+
+  it('rollbackTo：新分支保留到目标消息为止（含），之后留在原分支', () => {
+    const { convId, rootBranch, msgs } = chain();
+    const r = rollbackTo(msgs[1]!.id);
+    expect(listMessages(r.branchId).map((m) => m.text)).toEqual(['A', 'B']);
+    expect(r.parentMessageId).toBe(msgs[0]!.id);
+    // 原分支不动；分支记录 fork 点 = 目标消息本身
+    expect(listMessages(rootBranch)).toHaveLength(4);
+    const nb = listBranches(convId).find((b) => b.id === r.branchId);
+    expect(nb).toMatchObject({ parentBranchId: rootBranch, forkMessageId: msgs[1]!.id, messageCount: 2 });
+    // 回退到首条：新分支只含首条
+    const r2 = rollbackTo(msgs[0]!.id);
+    expect(listMessages(r2.branchId).map((m) => m.text)).toEqual(['A']);
+    expect(r2.parentMessageId).toBeNull();
   });
 
   it('retryFrom：新分支止于目标消息的父级，供重新生成', () => {
@@ -121,7 +132,7 @@ describe('data/conversations：消息链与分支', () => {
     const { rootBranch, msgs } = chain();
     const e = editMessage(msgs[1]!.id, 'B改');
     expect(listMessages(rootBranch).map((m) => m.text)).toEqual(['A', 'B', 'C', 'D']);
-    expect(listMessages(e.branchId).map((m) => m.text)).toEqual(['A', 'B改', 'C', 'D']);
+    expect(listMessages(e.branchId).map((m) => m.text)).toEqual(['A', 'B改']);
     // 新分支的消息 id 全新，与原分支零共享
     const rootIds = new Set(listMessages(rootBranch).map((m) => m.id));
     expect(listMessages(e.branchId).every((m) => !rootIds.has(m.id))).toBe(true);

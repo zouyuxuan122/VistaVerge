@@ -9,8 +9,34 @@
 import { fetch } from '@tauri-apps/plugin-http';
 
 export interface ChatMessage {
-  role: 'system' | 'user' | 'assistant';
+  role: 'system' | 'user' | 'assistant' | 'tool';
   content: string;
+  /** assistant 消息携带的工具调用（回传给供应商时必须原样带上）。 */
+  tool_calls?: OutgoingToolCall[];
+  /** role=tool 时必填：对应哪一次工具调用。 */
+  tool_call_id?: string;
+  /** role=tool 时的工具名（部分供应商要求）。 */
+  name?: string;
+}
+
+/** 回传协议用的工具调用形态（OpenAI 兼容 wire format）。 */
+export interface OutgoingToolCall {
+  id: string;
+  type: 'function';
+  function: { name: string; arguments: string };
+}
+
+/** 组装完成的工具调用（arguments 为 JSON 字符串，由调用方解析）。 */
+export interface AssembledToolCall {
+  id: string;
+  name: string;
+  arguments: string;
+}
+
+/** OpenAI 兼容工具声明。 */
+export interface ChatTool {
+  type: 'function';
+  function: { name: string; description: string; parameters: Record<string, unknown> };
 }
 
 export interface ChatUsage {
@@ -23,6 +49,8 @@ export interface ChatDone {
   finishReason: string | null;
   /** 供应商真实用量（开启 stream_options.include_usage 后由末个 chunk 带回）。 */
   usage?: ChatUsage;
+  /** finish_reason=tool_calls 时，流式增量组装完成的工具调用列表。 */
+  toolCalls?: AssembledToolCall[];
 }
 
 export type ChatChunk = { delta: string } | { done: ChatDone };
@@ -33,6 +61,9 @@ export interface StreamChatArgs {
   apiKey: string;
   messages: ChatMessage[];
   signal: AbortSignal;
+  /** 提供即启用工具调用；供应商不支持时应在错误中如实暴露。 */
+  tools?: ChatTool[];
+  toolChoice?: 'auto' | 'none';
 }
 
 interface PluginHttpResponse {
@@ -120,6 +151,64 @@ function abortError(): Error {
   return new DOMException('This operation was aborted', 'AbortError');
 }
 
+/* ------------------------------------------------------------------ */
+/* tool_calls 流式增量组装                                              */
+/* ------------------------------------------------------------------ */
+
+/**
+ * 把流式 delta.tool_calls 片段按 index 归并成完整调用。
+ * 片段形态：{index, id?, function?: {name?, arguments?}}，arguments 逐帧追加。
+ */
+export interface ToolCallAssembler {
+  pushPayload(data: string): void;
+  /** 有已组装调用时返回列表（index 升序），否则 undefined。 */
+  result(): AssembledToolCall[] | undefined;
+}
+
+export function createToolCallAssembler(): ToolCallAssembler {
+  const slots = new Map<number, { id: string; name: string; args: string }>();
+  return {
+    pushPayload(data: string): void {
+      const trimmed = data.trim();
+      if (trimmed.length === 0 || trimmed === '[DONE]') return;
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(trimmed);
+      } catch {
+        return; // 与 chatChunksFromData 一致：坏帧忽略
+      }
+      const deltas = (parsed as { choices?: { delta?: { tool_calls?: unknown } }[] }).choices?.[0]
+        ?.delta?.tool_calls;
+      if (!Array.isArray(deltas)) return;
+      for (const raw of deltas) {
+        const frag = raw as {
+          index?: number;
+          id?: string;
+          function?: { name?: string; arguments?: string };
+        };
+        const index = typeof frag.index === 'number' ? frag.index : 0;
+        const slot = slots.get(index) ?? { id: '', name: '', args: '' };
+        if (typeof frag.id === 'string' && frag.id) slot.id = frag.id;
+        if (typeof frag.function?.name === 'string' && frag.function.name) {
+          slot.name = frag.function.name;
+        }
+        if (typeof frag.function?.arguments === 'string') slot.args += frag.function.arguments;
+        slots.set(index, slot);
+      }
+    },
+    result(): AssembledToolCall[] | undefined {
+      if (slots.size === 0) return undefined;
+      return [...slots.entries()]
+        .sort((a, b) => a[0] - b[0])
+        .map(([index, slot], i) => ({
+          id: slot.id || `call_${i}`,
+          name: slot.name,
+          arguments: slot.args,
+        }));
+    },
+  };
+}
+
 /**
  * Stream a chat completion as chunks: `{delta}` for content and a final
  * `{done}`. Stops reading at the done chunk even if the server keeps the
@@ -145,6 +234,9 @@ export async function* streamChat(
       stream: true,
       // 让兼容端点在末帧回传真实用量；不支持的端点会忽略该字段，统计自动退回估算
       stream_options: { include_usage: true },
+      ...(args.tools && args.tools.length > 0
+        ? { tools: args.tools, tool_choice: args.toolChoice ?? 'auto' }
+        : {}),
     }),
   })) as PluginHttpResponse;
   if (!response.ok) {
@@ -153,9 +245,18 @@ export async function* streamChat(
   if (signal.aborted) throw abortError();
 
   const parser = createSseParser();
+  const toolCalls = createToolCallAssembler();
   const emitAll = function* (payloads: string[]): Generator<ChatChunk> {
     for (const payload of payloads) {
-      for (const chunk of chatChunksFromData(payload)) yield chunk;
+      toolCalls.pushPayload(payload);
+      for (const chunk of chatChunksFromData(payload)) {
+        // 工具调用只在 done 帧上交付：文本增量与调用增量走的是两条独立通道
+        if ('done' in chunk) {
+          const assembled = toolCalls.result();
+          if (assembled) chunk.done.toolCalls = assembled;
+        }
+        yield chunk;
+      }
     }
   };
 

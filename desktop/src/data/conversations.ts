@@ -207,8 +207,8 @@ export function addMessage(input: AddMessageInput): MessageRecord {
 }
 
 /**
- * 编辑消息 → 新分支（任务书步骤 5）：新分支为"自包含全量副本"——
- * 原分支中该消息之前的前缀副本 + 编辑后的消息 + 该消息之后的后缀副本；
+ * 编辑消息 → 新分支（UI 合同 §1.4.1）：新分支 = 该消息之前的前缀副本 + 编辑后的消息，
+ * **不搬运旧回复后缀**——编辑的语义是「从这里重新来过」，旧回答留在原分支可回溯。
  * 原分支原消息不动（保留完整历史），活动分支切到新分支。
  * copy 语义=剪贴板在 UI 层（数据层只负责分支与副本记录）。
  * fork_message_id = 被编辑消息的父（与父分支最后一个共享原消息）。
@@ -227,7 +227,6 @@ export function editMessage(id: string, newText: string): EditMessageResult {
   const index = chain.findIndex((row) => String(row.id) === id);
   if (index < 0) throw new Error(`editMessage: branch chain lost message ${id}`);
   const prefix = chain.slice(0, index);
-  const suffix = chain.slice(index + 1);
 
   const newBranchId = newId();
   const editedId = newId();
@@ -247,8 +246,40 @@ export function editMessage(id: string, newText: string): EditMessageResult {
         "VALUES (?, ?, ?, ?, ?, ?, ?, '1', ?)",
       [editedId, conversationId, newBranchId, String(message.role), text, lastId, String(message.id), now],
     );
-    lastId = editedId;
-    for (const source of suffix) {
+    db.run('UPDATE conversations SET active_branch_id = ?, updated_at = ? WHERE id = ?', [
+      newBranchId,
+      now,
+      conversationId,
+    ]);
+  });
+  db.schedulePersist();
+  return { branchId: newBranchId, messageId: editedId };
+}
+
+/**
+ * 回退到指定消息：新分支 = 到该消息为止（含）的前缀副本，之后的内容留在原分支。
+ * 与 retryFrom 的差别：rollbackTo 保留目标消息本身（用户想「回到这一点」，
+ * 而不是「删掉这一条重生成」）。外部动作（发送/购买等）不因回退而撤销（UI §1.4.4）。
+ */
+export function rollbackTo(id: string): RetryFromResult {
+  const db = getDb();
+  const message = db.get('SELECT * FROM messages WHERE id = ?', [id]);
+  if (!message) throw new Error(`rollbackTo: message not found: ${id}`);
+
+  const oldBranchId = String(message.branch_id);
+  const conversationId = String(message.conversation_id);
+  const prefix = prefixChain(db, oldBranchId, id);
+
+  const newBranchId = newId();
+  const now = nowMs();
+  db.transaction(() => {
+    db.run(
+      'INSERT INTO branches (id, conversation_id, parent_branch_id, fork_message_id, title, created_at) ' +
+        'VALUES (?, ?, ?, ?, NULL, ?)',
+      [newBranchId, conversationId, oldBranchId, id, now],
+    );
+    let lastId: string | null = null;
+    for (const source of prefix) {
       lastId = insertMessageCopy(db, conversationId, newBranchId, source, lastId);
     }
     db.run('UPDATE conversations SET active_branch_id = ?, updated_at = ? WHERE id = ?', [
@@ -258,7 +289,8 @@ export function editMessage(id: string, newText: string): EditMessageResult {
     ]);
   });
   db.schedulePersist();
-  return { branchId: newBranchId, messageId: editedId };
+  const parentId = message.parent_id == null ? null : String(message.parent_id);
+  return { branchId: newBranchId, parentMessageId: parentId };
 }
 
 /**

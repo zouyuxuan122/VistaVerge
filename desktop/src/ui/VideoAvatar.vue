@@ -5,7 +5,7 @@
 // ——新 clone 的仓库里没有这些文件，构建会直接失败。用 import.meta.glob 惰性解析：
 // 素材在 → 正常渲染；素材缺 → 诚实显示「缺素材」，构建仍可通过。
 import { computed, ref, watch } from 'vue';
-import { store } from '../app/store';
+import { store, pokeAvatar } from '../app/store';
 
 const videoModules = import.meta.glob('../assets/*.mp4', {
   eager: true,
@@ -57,6 +57,21 @@ watch(
   },
   { immediate: true },
 );
+
+/* ── 戳一戳气泡（视频形象无表情控制，反应以台词气泡呈现） ── */
+const pokeText = ref('');
+const pokeKey = ref(0);
+let pokeTimer: ReturnType<typeof setTimeout> | null = null;
+watch(
+  () => store.pokeBubble?.ts,
+  (ts) => {
+    if (!ts || !store.pokeBubble) return;
+    pokeText.value = store.pokeBubble.text;
+    pokeKey.value = ts;
+    if (pokeTimer) clearTimeout(pokeTimer);
+    pokeTimer = setTimeout(() => (pokeText.value = ''), 2600);
+  },
+);
 </script>
 
 <template>
@@ -73,6 +88,10 @@ watch(
       @error="loadError = '视频素材加载失败'"
     />
     <div v-else class="avatar-fallback">{{ loadError }}</div>
+    <div class="poke-zone" title="戳她一下" @click="pokeAvatar()" />
+    <transition name="poke-pop">
+      <div v-if="pokeText" class="poke-bubble" :key="pokeKey">{{ pokeText }}</div>
+    </transition>
     <span class="scene-tag">视频数字人 · 素材用户自备 · 不可表情控制</span>
   </section>
 </template>
@@ -100,4 +119,35 @@ watch(
   color: var(--muted);
   font-size: 13px;
 }
+.poke-zone {
+  position: absolute;
+  left: 50%;
+  top: 18%;
+  width: 46%;
+  height: 52%;
+  transform: translateX(-50%);
+  pointer-events: auto;
+  cursor: pointer;
+  border-radius: 40%;
+}
+.poke-bubble {
+  position: absolute;
+  top: 12%;
+  left: 50%;
+  transform: translateX(-50%);
+  max-width: 72%;
+  padding: 8px 14px;
+  background: var(--panel);
+  border: 2px solid var(--ink, currentColor);
+  border-radius: 14px;
+  box-shadow: 3px 3px 0 rgba(0, 0, 0, 0.25);
+  font-size: 13px;
+  color: var(--text);
+  pointer-events: none;
+  z-index: 5;
+}
+.poke-pop-enter-active { transition: all 0.18s ease-out; }
+.poke-pop-leave-active { transition: all 0.3s ease-in; }
+.poke-pop-enter-from { opacity: 0; transform: translateX(-50%) translateY(8px) scale(0.92); }
+.poke-pop-leave-to { opacity: 0; transform: translateX(-50%) translateY(-6px); }
 </style>

@@ -6,17 +6,21 @@ import {
   sendUserText,
   editUserMessage,
   retryAssistant,
+  rollbackToMessage,
   copyText,
   switchBranch,
   toggleVoice,
-  getVoice,
+  interruptGeneration,
 } from '../app/store';
 
 const draft = ref('');
 const editingId = ref<string | null>(null);
 const editingText = ref('');
 const composing = ref(false);
+const copiedId = ref<string | null>(null);
+const rollbackConfirmId = ref<string | null>(null);
 const scroller = ref<HTMLElement | null>(null);
+let copiedTimer: ReturnType<typeof setTimeout> | null = null;
 
 watch(
   () => [store.messages.length, store.streaming],
@@ -50,9 +54,35 @@ function startEdit(id: string, text: string) {
 
 function confirmEdit() {
   if (editingId.value && editingText.value.trim()) {
-    editUserMessage(editingId.value, editingText.value.trim());
+    void editUserMessage(editingId.value, editingText.value.trim());
   }
   editingId.value = null;
+}
+
+async function onCopy(id: string, text: string) {
+  // 剪贴板可能因权限被拒（如无手势的自动场景）：反馈要如实，不能假装成功
+  let ok = true;
+  try {
+    await copyText(text);
+  } catch {
+    ok = false;
+  }
+  copiedId.value = ok ? id : `fail:${id}`;
+  if (copiedTimer) clearTimeout(copiedTimer);
+  copiedTimer = setTimeout(() => (copiedId.value = null), 1200);
+}
+
+/** 回退有确认态：它不撤销已发生的外部动作（发出的消息/家居控制等）。 */
+function onRollback(id: string) {
+  if (rollbackConfirmId.value === id) {
+    rollbackConfirmId.value = null;
+    rollbackToMessage(id);
+  } else {
+    rollbackConfirmId.value = id;
+    setTimeout(() => {
+      if (rollbackConfirmId.value === id) rollbackConfirmId.value = null;
+    }, 3000);
+  }
 }
 
 function fmtTime(ts: number): string {
@@ -68,7 +98,7 @@ function fmtTime(ts: number): string {
         {{ b.title || `分支 ${i + 1}` }}（{{ b.messageCount }} 条）
       </option>
     </select>
-    <span>编辑历史消息会生成新分支，原分支保留</span>
+    <span>编辑/回退会生成新分支，原分支保留</span>
   </div>
 
   <div class="pane-scroll" ref="scroller" data-testid="chat-scroll">
@@ -87,15 +117,25 @@ function fmtTime(ts: number): string {
         </div>
         <div class="tools">
           <span style="font-size:10px;color:var(--muted)">{{ fmtTime(m.createdAt) }}</span>
-          <button @click="copyText(m.text)">复制</button>
+          <button @click="onCopy(m.id, m.text)">
+            {{ copiedId === m.id ? '已复制 ✓' : copiedId === `fail:${m.id}` ? '复制失败' : '复制' }}
+          </button>
           <template v-if="m.role === 'user'">
             <button v-if="editingId !== m.id" @click="startEdit(m.id, m.text)">编辑</button>
             <template v-else>
-              <button @click="confirmEdit">生成新分支</button>
+              <button @click="confirmEdit">重新生成</button>
               <button @click="editingId = null">取消</button>
             </template>
           </template>
           <button v-if="m.role === 'assistant'" @click="retryAssistant(m.id)">重试</button>
+          <button
+            class="rollback-btn"
+            :class="{ armed: rollbackConfirmId === m.id }"
+            :title="'回到这条消息为止，之后的对话移入原分支保留；不撤销已执行的外部动作'"
+            @click="onRollback(m.id)"
+          >
+            {{ rollbackConfirmId === m.id ? '确认回退？（外部动作不撤销）' : '回退到此处' }}
+          </button>
         </div>
       </div>
     </div>
@@ -103,6 +143,10 @@ function fmtTime(ts: number): string {
     <div v-if="store.streaming !== null" class="msg role-assistant">
       <div class="avatar">V</div>
       <div class="bubble streaming-caret">{{ store.streaming }}</div>
+    </div>
+    <div v-if="store.toolStatus" class="msg role-assistant">
+      <div class="avatar">V</div>
+      <div class="bubble tool-status">{{ store.toolStatus }}</div>
     </div>
     <div v-if="store.error" class="msg"><div class="bubble" style="border-color:var(--err);color:var(--err)">{{ store.error }}</div></div>
 
@@ -127,13 +171,33 @@ function fmtTime(ts: number): string {
         @compositionstart="composing = true"
         @compositionend="composing = false"
       />
+      <button
+        v-if="store.busy || store.voiceState === 'processing' || store.voiceState === 'ai-speaking'"
+        class="btn danger"
+        title="打断她：停止当前生成/合成/播放"
+        @click="interruptGeneration()"
+      >
+        ⏸ 打断
+      </button>
       <button class="btn" :class="{ danger: store.voiceState !== 'idle' }" @click="toggleVoice()">
         {{ store.voiceState === 'idle' ? '🎙 语音' : '■ 停止' }}
       </button>
       <button class="btn primary" :disabled="store.busy || !draft.trim()" @click="send">发送</button>
     </div>
     <div class="composer-hint">
-      语音输入与回答都会显示在这里；打断她说话也会形成新的一轮。{{ getVoice() ? '' : '' }}
+      语音输入与回答都会显示在这里；生成/播放中随时可「打断」，与她无关的话她会只记不回。
     </div>
   </div>
 </template>
+
+<style scoped>
+.rollback-btn.armed {
+  border-color: var(--err);
+  color: var(--err);
+}
+.tool-status {
+  font-size: 12px;
+  color: var(--muted);
+  font-style: italic;
+}
+</style>

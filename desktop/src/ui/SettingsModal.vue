@@ -25,6 +25,22 @@ import {
   setLocation,
   weatherFresh,
 } from '../sensors/perceptionStore';
+import { parseCharacterCard, type CharacterProfile } from '../companion/charcard';
+import {
+  loadStyleProfile,
+  setStyleEnabled,
+  addCatchphrase,
+  removeCatchphrase,
+  clearStyleProfile,
+  type StyleProfile,
+} from '../companion/styleProfile';
+import {
+  importKnowledgeDocFromBytes,
+  listKnowledgeDocs,
+  deleteKnowledgeDoc,
+  type KnowledgeDoc,
+} from '../companion/knowledge';
+import UpdatePanel from './UpdatePanel.vue';
 
 const form = reactive<ProviderSettings>({ ...store.providerSettings });
 const apiKey = ref('');
@@ -169,6 +185,133 @@ const haStatusText = computed(() => {
   return map[perception.haStatus] ?? perception.haStatus;
 });
 
+/* ── 陪伴：角色卡 / 口癖 / 知识库 ── */
+const cardFile = ref<HTMLInputElement | null>(null);
+const cardBusy = ref(false);
+const cardError = ref('');
+const cardPreview = ref<{ profile: CharacterProfile; warnings: string[]; injection: boolean } | null>(
+  store.providerSettings.personaCard
+    ? { profile: store.providerSettings.personaCard as CharacterProfile, warnings: [], injection: false }
+    : null,
+);
+
+async function onCardFile(e: Event) {
+  const file = (e.target as HTMLInputElement).files?.[0];
+  if (!file || cardBusy.value) return;
+  cardBusy.value = true;
+  cardError.value = '';
+  try {
+    const bytes = new Uint8Array(await file.arrayBuffer());
+    const result = await parseCharacterCard(bytes);
+    cardPreview.value = {
+      profile: result.profile,
+      warnings: result.warnings,
+      injection: result.injectionDetected,
+    };
+  } catch (err) {
+    cardError.value = err instanceof Error ? err.message : String(err);
+  } finally {
+    cardBusy.value = false;
+    if (cardFile.value) cardFile.value.value = '';
+  }
+}
+
+/** 应用角色卡：只写入人设快照（数据），instructions 与权限集不变。 */
+async function applyCard() {
+  if (!cardPreview.value) return;
+  const p = cardPreview.value.profile;
+  await saveProviderSettings({
+    ...form,
+    personaCard: {
+      specVersion: p.specVersion,
+      name: p.name,
+      description: p.description,
+      personality: p.personality,
+      scenario: p.scenario,
+      firstMessage: p.firstMessage,
+      exampleDialogue: p.exampleDialogue,
+    },
+  });
+  saved.value = true;
+  setTimeout(() => (saved.value = false), 1600);
+}
+
+async function clearCard() {
+  cardPreview.value = null;
+  await saveProviderSettings({ ...form, personaCard: null });
+}
+
+const styleProfile = ref<StyleProfile | null>(null);
+const newTic = ref('');
+
+function refreshStyle() {
+  try {
+    styleProfile.value = loadStyleProfile();
+  } catch {
+    styleProfile.value = null;
+  }
+}
+
+function toggleStyleEnabled(e: Event) {
+  styleProfile.value = setStyleEnabled((e.target as HTMLInputElement).checked);
+}
+
+function onAddTic() {
+  const text = newTic.value.trim();
+  if (!text) return;
+  styleProfile.value = addCatchphrase(text);
+  newTic.value = '';
+}
+
+function onRemoveTic(text: string) {
+  styleProfile.value = removeCatchphrase(text);
+}
+
+function onClearStyle() {
+  clearStyleProfile();
+  refreshStyle();
+}
+
+const knowledgeDocs = ref<KnowledgeDoc[]>([]);
+const knowFile = ref<HTMLInputElement | null>(null);
+const knowError = ref('');
+const knowBusy = ref(false);
+
+function refreshKnowledge() {
+  try {
+    knowledgeDocs.value = listKnowledgeDocs();
+  } catch {
+    knowledgeDocs.value = [];
+  }
+}
+
+async function onKnowledgeFile(e: Event) {
+  const file = (e.target as HTMLInputElement).files?.[0];
+  if (!file || knowBusy.value) return;
+  knowBusy.value = true;
+  knowError.value = '';
+  try {
+    const bytes = new Uint8Array(await file.arrayBuffer());
+    importKnowledgeDocFromBytes({ name: file.name, bytes, license: '用户自供资料' });
+    refreshKnowledge();
+  } catch (err) {
+    knowError.value = err instanceof Error ? err.message : String(err);
+  } finally {
+    knowBusy.value = false;
+    if (knowFile.value) knowFile.value.value = '';
+  }
+}
+
+function onDeleteKnowledge(id: string) {
+  deleteKnowledgeDoc(id);
+  refreshKnowledge();
+}
+
+onMounted(() => {
+  refreshStyle();
+  refreshKnowledge();
+});
+
 function close() {
   closeSettings();
 }
@@ -180,8 +323,10 @@ function close() {
       <h2>设置</h2>
       <div class="subtabs">
         <button :aria-pressed="store.settingsTab === 'normal'" @click="store.settingsTab = 'normal'">普通</button>
+        <button :aria-pressed="store.settingsTab === 'companion'" @click="store.settingsTab = 'companion'">陪伴</button>
         <button :aria-pressed="store.settingsTab === 'perception'" @click="store.settingsTab = 'perception'">感知与家居</button>
         <button :aria-pressed="store.settingsTab === 'advanced'" @click="store.settingsTab = 'advanced'">高级</button>
+        <button :aria-pressed="store.settingsTab === 'update'" @click="store.settingsTab = 'update'">更新</button>
       </div>
 
       <template v-if="store.settingsTab === 'normal'">
@@ -264,6 +409,81 @@ function close() {
         </div>
       </template>
 
+      <template v-else-if="store.settingsTab === 'companion'">
+        <!-- 角色卡：支持 SillyTavern v1/v2/v3 JSON 与内嵌 PNG；仅数据解析，不提升权限 -->
+        <div class="field">
+          <label>角色卡（v2/v3 JSON 或 PNG 卡）</label>
+          <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+            <input ref="cardFile" type="file" accept=".json,.png,application/json,image/png" style="display:none" @change="onCardFile" />
+            <button class="btn" type="button" :disabled="cardBusy" @click="cardFile?.click()">
+              {{ cardBusy ? '解析中…' : '选择角色卡文件' }}
+            </button>
+            <button v-if="cardPreview" class="btn" type="button" @click="clearCard">清除角色卡</button>
+          </div>
+          <p v-if="cardError" class="field-note" style="color:var(--err)">{{ cardError }}</p>
+          <div v-if="cardPreview" class="field-note" style="border:1px dashed var(--line);border-radius:8px;padding:8px;margin-top:6px">
+            <strong>{{ cardPreview.profile.name || '（未命名角色）' }}</strong>
+            <span style="color:var(--muted)"> · {{ cardPreview.profile.specVersion }}</span>
+            <p style="margin:6px 0 0;white-space:pre-wrap">{{ (cardPreview.profile.description || cardPreview.profile.personality || '（无描述）').slice(0, 160) }}</p>
+            <p v-if="cardPreview.injection" style="color:var(--err);margin:6px 0 0">
+              检测到疑似指令式文本：已按纯数据隔离，不会成为她的指令。
+            </p>
+            <p v-for="(w, i) in cardPreview.warnings.slice(0, 3)" :key="i" style="color:var(--muted);margin:2px 0 0">{{ w }}</p>
+            <button class="btn primary" type="button" style="margin-top:8px" @click="applyCard">应用这个角色</button>
+          </div>
+          <p class="field-note">
+            角色卡只改变她的人设与语气，不改变任何工具权限。酒馆（SillyTavern）社区的 .png/.json 卡可直接导入；
+            社区卡市场接入将随插件源体系开放。
+          </p>
+        </div>
+
+        <hr class="modal-hr" />
+        <!-- 口癖学习 -->
+        <div class="field">
+          <label>口癖学习（她从你的消息里学说话习惯）</label>
+          <label style="display:flex;gap:6px;align-items:center">
+            <input type="checkbox" :checked="styleProfile?.enabled !== false" @change="toggleStyleEnabled" />
+            启用口癖学习（强度档在「高级」页调）
+          </label>
+          <div v-if="styleProfile" class="field-note" style="margin-top:6px">
+            已学样本 {{ styleProfile.sampleCount }} 条；平均句长 {{ Math.round(styleProfile.avgSentenceLength) }} 字。
+            <div v-if="styleProfile.catchphrases.length" style="display:flex;gap:6px;flex-wrap:wrap;margin-top:6px">
+              <span v-for="tic in styleProfile.catchphrases" :key="tic.text" class="pill" style="display:inline-flex;gap:4px;align-items:center">
+                {{ tic.text }}<template v-if="tic.manual">（手动）</template>
+                <a href="javascript:void 0" style="color:var(--err)" @click="onRemoveTic(tic.text)">×</a>
+              </span>
+            </div>
+            <p v-else style="color:var(--muted);margin:6px 0 0">还没学到明显口癖，多聊几句就有了。</p>
+            <div style="display:flex;gap:8px;margin-top:8px">
+              <input v-model="newTic" placeholder="手动加一条口癖，例如：捏" style="flex:1" @keydown.enter.prevent="onAddTic" />
+              <button class="btn" type="button" @click="onAddTic">添加</button>
+              <button class="btn" type="button" @click="onClearStyle">清空重学</button>
+            </div>
+          </div>
+        </div>
+
+        <hr class="modal-hr" />
+        <!-- 知识库 -->
+        <div class="field">
+          <label>知识库（导入资料，她对话时自动检索引用）</label>
+          <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+            <input ref="knowFile" type="file" accept=".txt,.md,.text,.markdown" style="display:none" @change="onKnowledgeFile" />
+            <button class="btn" type="button" :disabled="knowBusy" @click="knowFile?.click()">
+              {{ knowBusy ? '导入中…' : '导入 txt/md 文档' }}
+            </button>
+            <span style="color:var(--muted);font-size:12px">{{ knowledgeDocs.length }} 篇文档</span>
+          </div>
+          <p v-if="knowError" class="field-note" style="color:var(--err)">{{ knowError }}</p>
+          <ul v-if="knowledgeDocs.length" class="field-note" style="margin-top:6px;padding-left:0;list-style:none">
+            <li v-for="doc in knowledgeDocs" :key="doc.id" style="display:flex;justify-content:space-between;gap:8px;padding:4px 0;border-bottom:1px dashed var(--line)">
+              <span>{{ doc.name }} <span style="color:var(--muted)">（{{ doc.chunkCount }} 段）</span></span>
+              <a href="javascript:void 0" style="color:var(--err)" @click="onDeleteKnowledge(doc.id)">删除</a>
+            </li>
+          </ul>
+          <p class="field-note">资料文本按不可信数据处理；PPT 课件请到「学习」页导入，那边支持讲课。</p>
+        </div>
+      </template>
+
       <template v-else-if="store.settingsTab === 'perception'">
         <div class="field-row">
           <div class="field"><label>地点名（仅显示用）</label><input v-model="locForm.label" placeholder="北京" /></div>
@@ -309,12 +529,72 @@ function close() {
         </div>
       </template>
 
-      <template v-else>
-        <div class="field"><label>语音识别停顿（ms，语音引擎参数）</label><input value="1200" disabled /></div>
-        <div class="field"><label>历史轮数</label><input value="8" disabled /></div>
+      <template v-else-if="store.settingsTab === 'advanced'">
+        <div class="field-row">
+          <div class="field">
+            <label>历史轮数（0 = 不带历史）</label>
+            <input v-model.number="form.historyTurns" type="number" min="0" max="32" step="1" />
+          </div>
+          <div class="field">
+            <label>打断灵敏度（连续有声帧，1 最灵敏 / 10 最迟钝）</label>
+            <input v-model.number="form.bargeInFrames" type="number" min="1" max="25" step="1" />
+          </div>
+        </div>
+        <div class="field-row">
+          <div class="field">
+            <label>语音回应门控（常听时哪些话要回）</label>
+            <select v-model="form.respondMode">
+              <option value="all">全回应（每段语音都回）</option>
+              <option value="smart">智能（与她无关的只记不回，省 token）</option>
+              <option value="name">仅唤醒名（叫名字才回）</option>
+            </select>
+          </div>
+          <div class="field">
+            <label>唤醒名（门控=仅唤醒名时生效；留空用内置名）</label>
+            <input v-model="form.wakeName" placeholder="例如：小薇" />
+          </div>
+        </div>
+        <div class="field-row">
+          <div class="field">
+            <label>主动插话强度（提醒/任务完成时她主动开口）</label>
+            <select v-model.number="form.proactiveIntensity">
+              <option :value="0">关闭</option>
+              <option :value="1">保守</option>
+              <option :value="2">活泼</option>
+            </select>
+          </div>
+          <div class="field">
+            <label>口癖跟随强度（她自然呼应你的说话习惯）</label>
+            <select v-model.number="form.styleIntensity">
+              <option :value="0">关闭</option>
+              <option :value="1">轻微</option>
+              <option :value="2">明显</option>
+            </select>
+          </div>
+        </div>
+        <div class="field" style="display:flex;gap:18px;flex-wrap:wrap">
+          <label style="display:flex;gap:6px;align-items:center">
+            <input v-model="form.toolsEnabled" type="checkbox" /> 允许她对话中查记忆/天气（只读工具）
+          </label>
+          <label style="display:flex;gap:6px;align-items:center">
+            <input v-model="form.styleEnabled" type="checkbox" /> 口癖学习
+          </label>
+          <label style="display:flex;gap:6px;align-items:center">
+            <input v-model="form.knowledgeEnabled" type="checkbox" /> 记忆/知识库注入
+          </label>
+          <label style="display:flex;gap:6px;align-items:center">
+            <input v-model="form.reduceMotion" type="checkbox" /> 减少动态效果
+          </label>
+        </div>
         <p class="field-note">
-          高级项（VAD/队列容量/代际调试/数据目录）将在运行时面板开放；当前固定为已调优默认值。密钥仅存系统凭据仓，诊断导出默认脱敏。
+          回应门控/打断灵敏度在下次开启语音时生效。本地 TTS（IndexTTS-2.5、Qwen3-TTS 等）：
+          启动其 OpenAI 兼容服务后，把「普通 → TTS baseUrl」填为 http://127.0.0.1:端口/v1 即可接入；
+          能力徽章会如实显示流式/批式。密钥仅存系统凭据仓，诊断导出默认脱敏。
         </p>
+      </template>
+
+      <template v-else-if="store.settingsTab === 'update'">
+        <UpdatePanel />
       </template>
 
       <div class="actions">

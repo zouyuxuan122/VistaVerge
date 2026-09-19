@@ -6,9 +6,25 @@
 // it exists for offline demos and tests only and never counts as vendor
 // acceptance (VOICE.md §6: 模拟服务只能证明接线).
 import { streamChat } from './openaiCompat';
-import type { ChatChunk, ChatDone, ChatMessage, StreamChatArgs } from './openaiCompat';
+import type {
+  AssembledToolCall,
+  ChatChunk,
+  ChatDone,
+  ChatMessage,
+  ChatTool,
+  OutgoingToolCall,
+  StreamChatArgs,
+} from './openaiCompat';
 
-export type { ChatChunk, ChatDone, ChatMessage, StreamChatArgs };
+export type {
+  AssembledToolCall,
+  ChatChunk,
+  ChatDone,
+  ChatMessage,
+  ChatTool,
+  OutgoingToolCall,
+  StreamChatArgs,
+};
 
 export interface ProviderCapabilities {
   /** True when the provider streams deltas; false means batch/sentence mode. */

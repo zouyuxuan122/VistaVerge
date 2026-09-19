@@ -44,11 +44,11 @@ describe('对话持久化与分支', () => {
     expect(store.messages[1].text).toContain('第一段');
   });
 
-  it('编辑用户消息生成新分支，原分支消息保留', () => {
+  it('编辑用户消息生成新分支，原分支消息保留', async () => {
     const originalBranch = store.branchId;
     const userMsg = store.messages.find((m) => m.role === 'user');
     expect(userMsg).toBeTruthy();
-    editUserMessage(userMsg!.id, '改一下：请用一句话回答');
+    await editUserMessage(userMsg!.id, '改一下：请用一句话回答');
     expect(store.branchId).not.toBe(originalBranch);
     expect(store.messages.some((m) => m.text.includes('改一下'))).toBe(true);
     expect(store.branches.length).toBeGreaterThan(1);

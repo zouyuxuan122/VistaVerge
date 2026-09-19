@@ -6,7 +6,7 @@
 // 能力：状态联动、模型表情/动作、音频近似口型（非 viseme，已标注）、面向用户。
 import { onBeforeUnmount, onMounted, ref, watch } from 'vue';
 import * as PIXI from 'pixi.js';
-import { store } from '../app/store';
+import { store, pokeAvatar } from '../app/store';
 import { LIVE2D_MODEL_BUNDLED } from '../app/avatarDefaults';
 import { loadImportedManifest, isTauriAvailable, type ImportResult } from '../platform/live2dImport';
 import { registerAvatarController } from '../app/avatarBridge';
@@ -262,6 +262,21 @@ onBeforeUnmount(() => {
   } catch { /* 已销毁 */ }
   app = null;
 });
+
+/* ── 戳一戳气泡（本地反应台词，2.6s 自动消散） ── */
+const pokeText = ref('');
+const pokeKey = ref(0);
+let pokeTimer: ReturnType<typeof setTimeout> | null = null;
+watch(
+  () => store.pokeBubble?.ts,
+  (ts) => {
+    if (!ts || !store.pokeBubble) return;
+    pokeText.value = store.pokeBubble.text;
+    pokeKey.value = ts;
+    if (pokeTimer) clearTimeout(pokeTimer);
+    pokeTimer = setTimeout(() => (pokeText.value = ''), 2600);
+  },
+);
 </script>
 
 <template>
@@ -273,6 +288,11 @@ onBeforeUnmount(() => {
       <small v-if="LIVE2D_MODEL_BUNDLED">把 fense 模型放入 desktop/public/live2d/ 后重启</small>
       <small v-else>可在 设置 → 数字人形象 里导入模型文件夹</small>
     </div>
+    <!-- 戳一戳热区（pixi 事件系统因 v6/v7 混血整体禁用，故用 DOM 热区，见 §9.6） -->
+    <div class="poke-zone" title="戳她一下" @click="pokeAvatar()" />
+    <transition name="poke-pop">
+      <div v-if="pokeText" class="poke-bubble" :key="pokeKey">{{ pokeText }}</div>
+    </transition>
     <span class="scene-tag">Live2D · 阿芙洛狄忒（用户自备）· 口型为音频近似</span>
   </section>
 </template>
@@ -296,4 +316,36 @@ onBeforeUnmount(() => {
   line-height: 2;
   padding: 20px;
 }
+/* 戳一戳热区：覆盖她上半身区域（父链 pointer-events:none，这里显式恢复） */
+.poke-zone {
+  position: absolute;
+  left: 50%;
+  top: 18%;
+  width: 46%;
+  height: 52%;
+  transform: translateX(-50%);
+  pointer-events: auto;
+  cursor: pointer;
+  border-radius: 40%;
+}
+.poke-bubble {
+  position: absolute;
+  top: 12%;
+  left: 50%;
+  transform: translateX(-50%);
+  max-width: 72%;
+  padding: 8px 14px;
+  background: var(--panel);
+  border: 2px solid var(--ink, currentColor);
+  border-radius: 14px;
+  box-shadow: 3px 3px 0 rgba(0, 0, 0, 0.25);
+  font-size: 13px;
+  color: var(--text);
+  pointer-events: none;
+  z-index: 5;
+}
+.poke-pop-enter-active { transition: all 0.18s ease-out; }
+.poke-pop-leave-active { transition: all 0.3s ease-in; }
+.poke-pop-enter-from { opacity: 0; transform: translateX(-50%) translateY(8px) scale(0.92); }
+.poke-pop-leave-to { opacity: 0; transform: translateX(-50%) translateY(-6px); }
 </style>
