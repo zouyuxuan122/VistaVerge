@@ -117,9 +117,10 @@ describe('parseManifest 非法输入', () => {
     );
   });
 
-  it('license 非法：空串 / 非字符串', () => {
+  it('license 非法：空串 / 非字符串（类型错误用 invalid-field 并按字段区分，B-P-08）', () => {
     expectCode(() => parseManifest({ ...base, license: '   ' }), 'invalid-license', 'license');
-    expectCode(() => parseManifest({ ...base, license: 7 }), 'invalid-license', 'license');
+    expectCode(() => parseManifest({ ...base, license: 7 }), 'invalid-field', 'license');
+    expectCode(() => parseManifest({ ...base, version: 7 as never }), 'invalid-field', 'version');
   });
 
   it('字段超限被拒绝', () => {

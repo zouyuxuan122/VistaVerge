@@ -34,15 +34,18 @@ import {
   type TaskKind,
   type TaskStatus,
 } from './tasks';
-import { generateWorld, type Vec3, type VoxelWorld } from './world';
+import { generateWorld, VoxelWorld, type Vec3 } from './world';
 
-export type BotStatus = 'idle' | 'moving' | 'mining' | 'placing' | 'crafting' | 'dead';
+export type BotStatus = 'idle' | 'moving' | 'mining' | 'placing' | 'crafting' | 'fighting' | 'dead';
 
 export interface McEvent {
   at: number;
-  kind: 'task' | 'move' | 'mine' | 'craft' | 'build' | 'damage' | 'death' | 'info';
+  kind: 'task' | 'move' | 'mine' | 'craft' | 'build' | 'damage' | 'death' | 'combat' | 'info';
   text: string;
 }
+
+/** 值得告诉用户（由前台接到对话播报）的模拟事件种类。 */
+export type McNoticeKind = 'task-done' | 'task-failed' | 'death' | 'retaliate';
 
 export interface BotState {
   /** 脚所在位置（浮点，格中心为 .5）。 */
@@ -65,6 +68,25 @@ export interface BotState {
   blocksMined: number;
   blocksPlaced: number;
   distanceWalked: number;
+  /** 主动/反击命中次数（战斗统计，UI 与测试用）。 */
+  attacks: number;
+}
+
+/** 模拟世界里的敌对生物（受击与 PvP 的真实事件源，G-MC-02）。 */
+export interface MobState {
+  name: string;
+  x: number;
+  z: number;
+  health: number;
+  maxHealth: number;
+  alive: boolean;
+  lastAttackAt: number;
+}
+
+/** PvP 配置（DOMAIN_PLUGINS §3.3）：默认保守，关闭时不主动攻击。 */
+export interface PvpConfig {
+  enabled: boolean;
+  retaliate: boolean;
 }
 
 export interface PlayerState {
@@ -83,6 +105,10 @@ export interface SimOptions {
   inventorySlots?: number;
   /** 是否开启受击（验收矩阵的「受击开关」）。 */
   hostile?: boolean;
+  /** PvP 主动攻击开关（默认关）。 */
+  pvpEnabled?: boolean;
+  /** 被攻击时是否自动反击（默认关；仅在 pvpEnabled 时生效）。 */
+  pvpRetaliate?: boolean;
 }
 
 const DEFAULT_OPTIONS: Required<SimOptions> = {
@@ -93,57 +119,86 @@ const DEFAULT_OPTIONS: Required<SimOptions> = {
   speed: 3.2,
   inventorySlots: 12,
   hostile: false,
+  pvpEnabled: false,
+  pvpRetaliate: false,
 };
 
 /** 到达判定阈值（格）。 */
 const ARRIVE_EPS = 0.09;
 /** 挖掘伸手距离（格）。 */
 const REACH = 4.2;
+/** 敌对生物参数（模拟参数，不是真实 MC 数值）。 */
+const MOB_SPEED = 3.0;
+const MOB_ATTACK_RANGE = 2.2;
+const MOB_ATTACK_COOLDOWN_MS = 2000;
+const MOB_DAMAGE = 2;
+const MOB_MAX_HEALTH = 12;
+/** 她每次攻击的伤害与出手间隔。 */
+const BOT_ATTACK_DAMAGE = 4;
+const BOT_ATTACK_COOLDOWN_MS = 500;
+/** 低于该生命值时停止战斗并撤离求援。 */
+const FLEE_HEALTH = 6;
+/**
+ * 每次受击后的规避持续时间（毫秒）。刻意很短：规避是「拉开一点距离」而不是
+ * 无限逃跑，否则她会一路被追着跑离出生点，重生落点也会失真。
+ */
+const FLEE_DURATION_MS = 400;
 
 function taskId(seq: number): string {
   return `mc-task-${seq}`;
 }
 
 export class McSimulation {
-  readonly world: VoxelWorld;
-  readonly spawn: Vec3;
-  readonly bot: BotState;
-  readonly player: PlayerState;
+  world: VoxelWorld;
+  spawn: Vec3;
+  bot: BotState;
+  player: PlayerState;
+  /** 敌对生物：受击与 PvP 的真实事件源。 */
+  mob: MobState;
+  /** PvP 配置（运行时可通过 setPvp 切换）。 */
+  pvp: PvpConfig;
   readonly tasks: Task[] = [];
   readonly log: McEvent[] = [];
   /** 模拟世界内累计时间（ms）。 */
   timeMs = 0;
   hostile: boolean;
+  /**
+   * 值得播报的事件出口（会话层接线到 setMcEventListener）。
+   * 任务完成/失败、死亡、自动反击都会经此回调，供前台接到对话播报。
+   */
+  onNotice: ((kind: McNoticeKind, summary: string) => void) | null = null;
 
-  private readonly options: Required<SimOptions>;
+  private options: Required<SimOptions>;
   private seq = 0;
   private current: Task | null = null;
   private followRepathAt = 0;
   private respawnAt = 0;
-  private nextHostileAt = 0;
   private craftUntil = 0;
   private buildQueue: Vec3[] = [];
   private depositPending = 0;
+  /** B-P-01：搭建任务的「已初始化」标志，必须按任务而非全局计数器判定。 */
+  private buildInitialized = false;
+  /** 本次搭建任务实际放置的方块数（诚实报告，不复用累计值）。 */
+  private buildPlacedForTask = 0;
+  /** 攻击任务的重新寻路节流。 */
+  private attackRepathAt = 0;
+  private nextAttackAt = 0;
+  /** 受击后的规避窗口。 */
+  private fleeUntil = 0;
+  /** 规避日志节流（初值 -Infinity，保证第一次受击就能留下日志）。 */
+  private fleeLoggedFor = Number.NEGATIVE_INFINITY;
   /** 背包内累计采集数量（用于任务进度统计，与库存区分：木板会消耗原木）。 */
   private harvested: Partial<Record<BlockId, number>> = {};
   private minedForTask = 0;
 
   constructor(options: SimOptions = {}) {
-    this.options = { ...DEFAULT_OPTIONS, ...options };
-    const generated = generateWorld({
-      width: this.options.width,
-      height: this.options.height,
-      depth: this.options.depth,
-      seed: this.options.seed,
-    });
-    this.world = generated.world;
-    this.spawn = generated.spawn;
-    this.player = { x: generated.spawn.x + 4, z: generated.spawn.z + 3 };
-    this.hostile = this.options.hostile;
+    this.world = new VoxelWorld({ width: 1, height: 1, depth: 1, seed: 0 });
+    this.spawn = { x: 0.5, y: 1, z: 0.5 };
+    this.player = { x: 0.5, z: 0.5 };
     this.bot = {
-      x: generated.spawn.x,
-      y: generated.spawn.y,
-      z: generated.spawn.z,
+      x: 0.5,
+      y: 1,
+      z: 0.5,
       status: 'idle',
       health: 20,
       inventory: {},
@@ -157,7 +212,79 @@ export class McSimulation {
       blocksMined: 0,
       blocksPlaced: 0,
       distanceWalked: 0,
+      attacks: 0,
     };
+    this.mob = {
+      name: '敌对生物',
+      x: 0.5,
+      z: 0.5,
+      health: MOB_MAX_HEALTH,
+      maxHealth: MOB_MAX_HEALTH,
+      alive: true,
+      lastAttackAt: 0,
+    };
+    this.pvp = { enabled: false, retaliate: false };
+    this.hostile = false;
+    this.options = { ...DEFAULT_OPTIONS };
+    this.setup(options);
+  }
+
+  /**
+   * 初始化/重置世界。`reset()` 复用本方法原地重建，避免 session 层用
+   * `Object.assign(sim, fresh)` 覆盖实例（那会连事件挂载点一起抹掉，B-P-09）。
+   */
+  private setup(options: SimOptions): void {
+    this.options = { ...DEFAULT_OPTIONS, ...options };
+    const generated = generateWorld({
+      width: this.options.width,
+      height: this.options.height,
+      depth: this.options.depth,
+      seed: this.options.seed,
+    });
+    this.world = generated.world;
+    this.spawn = generated.spawn;
+    this.player = { x: generated.spawn.x + 4, z: generated.spawn.z + 3 };
+    this.hostile = this.options.hostile;
+    this.pvp = { enabled: this.options.pvpEnabled, retaliate: this.options.pvpRetaliate };
+    this.bot.x = generated.spawn.x;
+    this.bot.y = generated.spawn.y;
+    this.bot.z = generated.spawn.z;
+    this.bot.status = 'idle';
+    this.bot.health = 20;
+    this.bot.inventory = {};
+    this.bot.tools = { axe: false, pickaxe: false };
+    this.bot.miningTarget = null;
+    this.bot.miningProgress = 0;
+    this.bot.path = [];
+    this.bot.pathIndex = 0;
+    this.bot.deaths = 0;
+    this.bot.blocksMined = 0;
+    this.bot.blocksPlaced = 0;
+    this.bot.distanceWalked = 0;
+    this.bot.attacks = 0;
+    this.mob.x = generated.spawn.x - 5;
+    this.mob.z = generated.spawn.z + 4;
+    this.mob.health = MOB_MAX_HEALTH;
+    this.mob.alive = true;
+    this.mob.lastAttackAt = 0;
+    this.tasks.length = 0;
+    this.log.length = 0;
+    this.timeMs = 0;
+    this.seq = 0;
+    this.current = null;
+    this.followRepathAt = 0;
+    this.respawnAt = 0;
+    this.craftUntil = 0;
+    this.buildQueue = [];
+    this.depositPending = 0;
+    this.buildInitialized = false;
+    this.buildPlacedForTask = 0;
+    this.attackRepathAt = 0;
+    this.nextAttackAt = 0;
+    this.fleeUntil = 0;
+    this.fleeLoggedFor = Number.NEGATIVE_INFINITY;
+    this.harvested = {};
+    this.minedForTask = 0;
     // inventoryFull 是派生量：库存被任何路径改动后都必须立刻正确。
     // 作为普通字段维护时，绕过 addItem/takeItem 的改动会让它长期失真。
     Object.defineProperty(this.bot, 'inventoryFull', {
@@ -166,6 +293,22 @@ export class McSimulation {
       configurable: true,
     });
     this.pushEvent('info', `模拟世界已生成（seed=${this.options.seed}，${this.options.width}×${this.options.depth}）`);
+  }
+
+  /** 重置为同 seed 的全新世界（验收可复现），并保留事件挂载点。 */
+  reset(options: SimOptions = {}): void {
+    this.setup(options);
+  }
+
+  /** 运行时切换 PvP（DOMAIN_PLUGINS §3.3）。关闭时不主动攻击。 */
+  setPvp(enabled: boolean, retaliate: boolean): void {
+    this.pvp = { enabled, retaliate: enabled ? retaliate : false };
+  }
+
+  /** 测试/调试：移动敌对生物位置。 */
+  moveMob(x: number, z: number): void {
+    this.mob.x = x;
+    this.mob.z = z;
   }
 
   /* ---------------- 事件与任务 ---------------- */
@@ -201,12 +344,31 @@ export class McSimulation {
     task.progress = 1;
     task.finishedAt = this.timeMs;
     this.pushEvent(status === 'done' ? 'task' : 'info', `${task.label} → ${status === 'done' ? '完成' : '失败'}：${note}`);
+    if (status === 'done' || status === 'failed') {
+      this.onNotice?.(status === 'done' ? 'task-done' : 'task-failed', `${task.label}：${note}`);
+    }
     this.current = null;
+    // B-P-02：把**全部**任务态一并重置。只清 miningTarget/path 会留下
+    // craftUntil/depositPending 等残留计时器，下一条同类任务会跳过材料校验
+    // 或跳过等待，直接「完成」——那是谎报。
+    this.resetTaskState();
+  }
+
+  /** 任务级状态清理（finish 与新任务开始时共用）。 */
+  private resetTaskState(): void {
     this.bot.miningTarget = null;
     this.bot.miningProgress = 0;
     this.bot.path = [];
     this.bot.pathIndex = 0;
     this.buildQueue = [];
+    this.craftUntil = 0;
+    this.depositPending = 0;
+    this.minedForTask = 0;
+    this.buildInitialized = false;
+    this.buildPlacedForTask = 0;
+    this.followRepathAt = 0;
+    this.attackRepathAt = 0;
+    this.nextAttackAt = 0;
   }
 
   /** 停止：取消当前与排队任务（急停，对应验收矩阵的「停止」）。 */
@@ -316,7 +478,92 @@ export class McSimulation {
       this.bot.miningProgress = 0;
       this.respawnAt = this.timeMs + 2000;
       this.pushEvent('death', '生命归零：背包掉落，2 秒后在出生点重生');
+      this.onNotice?.('death', '我在游戏里被击倒了：背包掉落，稍后在出生点重生。');
       if (this.current) this.finish(this.current, 'failed', '死亡中断');
+      return true;
+    }
+    this.reactToHit();
+    return false;
+  }
+
+  /**
+   * 受击反应（G-MC-02，纯本地状态机，不逐帧调用 LLM）：
+   * - PvP 开启且允许反击 → 自动还手（入队 attack 任务）；
+   * - 否则只规避不还手；生命值过低时一律撤离并求援。
+   */
+  private reactToHit(): void {
+    const lowHealth = this.bot.health <= FLEE_HEALTH;
+    if (!lowHealth && this.pvp.enabled && this.pvp.retaliate) {
+      const alreadyFighting =
+        this.current?.kind === 'attack' ||
+        this.tasks.some((task) => task.status === 'queued' && task.kind === 'attack');
+      if (!alreadyFighting) {
+        this.enqueue({ kind: 'attack', params: { target: 'mob' }, label: '反击敌对生物' });
+        this.pushEvent('combat', '被攻击：PvP 反击已开启，立刻还手');
+        this.onNotice?.('retaliate', '我在游戏里被攻击了，正在反击。');
+      }
+      return;
+    }
+    this.fleeUntil = this.timeMs + FLEE_DURATION_MS;
+    if (this.timeMs - this.fleeLoggedFor < 1500) return;
+    this.fleeLoggedFor = this.timeMs;
+    if (lowHealth) {
+      this.pushEvent('combat', `生命值偏低（${this.bot.health}/20）：停止战斗，撤离并求援`);
+      this.onNotice?.('retaliate', `我在游戏里血量只剩 ${this.bot.health}，先撤了，需要支援。`);
+    } else {
+      this.pushEvent('combat', 'PvP 关闭：只规避不还手（撤回出生点躲避）');
+    }
+  }
+
+  /**
+   * 规避：撤回出生点（家）躲避，而不是无限远离威胁。
+   * 这样落点有界、可复现；被追着跑离出生点会让重生落点失真。
+   */
+  private fleeStep(dtMs: number): void {
+    const dx = this.spawn.x - this.bot.x;
+    const dz = this.spawn.z - this.bot.z;
+    const dist = Math.hypot(dx, dz);
+    if (dist < 1) return;
+    const step = Math.min((this.options.speed * dtMs) / 1000, dist);
+    const nx = this.bot.x + (dx / dist) * step;
+    const nz = this.bot.z + (dz / dist) * step;
+    this.bot.distanceWalked += Math.hypot(nx - this.bot.x, nz - this.bot.z);
+    this.bot.x = nx;
+    this.bot.z = nz;
+    const standY = standHeight(this.world, Math.floor(nx), Math.floor(nz), Math.round(this.bot.y));
+    if (standY !== null) this.bot.y += (standY - this.bot.y) * 0.3;
+    this.bot.path = [];
+    this.bot.pathIndex = 0;
+  }
+
+  /** 敌对生物追击并攻击（受击开关开启时）；返回 true 表示这一下打死了她。 */
+  private stepMob(dtMs: number): boolean {
+    if (!this.mob.alive) return false;
+    const dx = this.bot.x - this.mob.x;
+    const dz = this.bot.z - this.mob.z;
+    const dist = Math.hypot(dx, dz);
+    if (dist > MOB_ATTACK_RANGE) {
+      const step = Math.min((MOB_SPEED * dtMs) / 1000, dist - MOB_ATTACK_RANGE + 0.01);
+      if (dist > 0) {
+        this.mob.x += (dx / dist) * step;
+        this.mob.z += (dz / dist) * step;
+      }
+      return false;
+    }
+    if (this.timeMs - this.mob.lastAttackAt < MOB_ATTACK_COOLDOWN_MS) return false;
+    this.mob.lastAttackAt = this.timeMs;
+    // 这一下可能正好打死她：死亡状态必须立刻生效并进入重生倒计时。
+    return this.damage(MOB_DAMAGE, '附近有敌对生物攻击');
+  }
+
+  /** 她攻击敌对生物一次；返回是否击倒目标。 */
+  private botAttack(): boolean {
+    this.mob.health = Math.max(0, this.mob.health - BOT_ATTACK_DAMAGE);
+    this.bot.attacks += 1;
+    this.pushEvent('combat', `命中${this.mob.name}（剩余生命 ${this.mob.health}）`);
+    if (this.mob.health <= 0) {
+      this.mob.alive = false;
+      this.pushEvent('combat', `${this.mob.name}已被击退`);
       return true;
     }
     return false;
@@ -352,16 +599,18 @@ export class McSimulation {
       return;
     }
 
-    if (this.hostile) {
-      if (this.nextHostileAt === 0) this.nextHostileAt = this.timeMs + 3000;
-      else if (this.timeMs >= this.nextHostileAt) {
-        this.nextHostileAt = this.timeMs + 3000;
-        // 这一下可能正好打死她：死亡状态必须立刻生效并进入重生倒计时，
-        // 否则会被下面的「无任务 → idle」分支覆盖，导致血量永远停在 0 且永不重生。
-        if (this.damage(2, '受击开关开启：附近有敌对生物')) return;
-      }
-    } else {
-      this.nextHostileAt = 0;
+    // 受击开关开启时，敌对生物会真实追击并攻击（受击反应见 reactToHit）。
+    if (this.hostile && this.stepMob(dtMs)) {
+      // 这一下正好打死她：死亡状态必须立刻生效并进入重生倒计时，
+      // 否则会被下面的「无任务 → idle」分支覆盖，导致血量永远停在 0 且永不重生。
+      return;
+    }
+
+    // 规避窗口优先于任务推进（PvP 关闭或低血量时只规避不还手）。
+    if (this.timeMs < this.fleeUntil) {
+      this.bot.status = 'moving';
+      this.fleeStep(dtMs);
+      return;
     }
 
     if (!this.current) {
@@ -372,10 +621,8 @@ export class McSimulation {
       }
       next.status = 'running';
       this.current = next;
-      this.minedForTask = 0;
-      this.bot.path = [];
-      this.bot.pathIndex = 0;
-      this.buildQueue = [];
+      // 新任务从干净的任务态开始：清掉上一条任务的残留计时器与队列。
+      this.resetTaskState();
     }
 
     const task = this.current;
@@ -402,6 +649,9 @@ export class McSimulation {
         return;
       case 'deposit':
         this.stepDeposit(task, dtMs);
+        return;
+      case 'attack':
+        this.stepAttack(task, dtMs);
         return;
       default:
         this.finish(task, 'failed', `未知任务类型 ${String(task.kind)}`);
@@ -630,7 +880,11 @@ export class McSimulation {
   }
 
   private stepBuild(task: Task, dtMs: number): void {
-    if (this.buildQueue.length === 0 && this.bot.blocksPlaced === 0 && task.progress === 0) {
+    // B-P-01：首次判定必须是**任务级标志**。之前用 `blocksPlaced === 0`，
+    // 第二次搭建时（她已放过方块）会跳过初始化，buildQueue 为空 →
+    // 立刻「小屋搭好了（放置 N 个方块）」，把上一条任务的成果谎报成本次成果。
+    if (!this.buildInitialized) {
+      this.buildInitialized = true;
       if (!this.hasItem(PLANKS, HUT_BLOCK_COST)) {
         this.finish(task, 'failed', `材料不足：小屋需要 ${HUT_BLOCK_COST} 个木板，现有 ${this.bot.inventory[PLANKS] ?? 0} 个`);
         return;
@@ -645,17 +899,22 @@ export class McSimulation {
         if (this.world.get(pos.x, pos.y, pos.z) === AIR) queue.push(pos);
       }
       this.buildQueue = queue;
+      this.buildPlacedForTask = 0;
       task.note = `开始搭建：需要放置 ${queue.length} 个方块`;
       this.pushEvent('build', `开始搭建小屋（锚点 ${anchorX},${anchorY},${anchorZ}，${queue.length} 个方块）`);
+      if (queue.length === 0) {
+        this.finish(task, 'done', '目标位置已被方块占满，本次未放置任何方块');
+        this.bot.status = 'idle';
+        return;
+      }
     }
 
     if (this.buildQueue.length === 0) {
-      this.finish(task, 'done', `小屋搭好了（放置 ${this.bot.blocksPlaced} 个方块）`);
+      this.finish(task, 'done', this.buildNote());
       this.bot.status = 'idle';
       return;
     }
-    const placedSoFar = Math.max(0, Math.round(task.progress * HUT_BLOCK_COST));
-    task.progress = Math.min(0.99, placedSoFar / Math.max(1, HUT_BLOCK_COST));
+    task.progress = Math.min(0.99, this.buildPlacedForTask / Math.max(1, HUT_BLOCK_COST));
     this.bot.status = 'placing';
     // 每 tick 放一块（有节奏，便于观察；不是瞬移式一次性铺满）
     const target = this.buildQueue[0];
@@ -687,13 +946,80 @@ export class McSimulation {
       this.world.set(target.x, target.y, target.z, PLANKS);
       this.takeItem(PLANKS, 1);
       this.bot.blocksPlaced += 1;
+      this.buildPlacedForTask += 1;
     }
     this.buildQueue.shift();
-    task.progress = Math.min(0.99, this.bot.blocksPlaced / Math.max(1, HUT_BLOCK_COST));
+    task.progress = Math.min(0.99, this.buildPlacedForTask / Math.max(1, HUT_BLOCK_COST));
     if (this.buildQueue.length === 0) {
-      this.finish(task, 'done', `小屋搭好了（放置 ${this.bot.blocksPlaced} 个方块）`);
+      this.finish(task, 'done', this.buildNote());
       this.bot.status = 'idle';
     }
+  }
+
+  /** 搭建完成文案：只报告**本次任务**放置的方块数，不复用累计值。 */
+  private buildNote(): string {
+    return this.buildPlacedForTask > 0
+      ? `小屋搭好了（本次放置 ${this.buildPlacedForTask} 个方块）`
+      : '没有需要放置的方块（本次放置 0 个）';
+  }
+
+  /**
+   * 攻击/反击敌对生物（G-MC-02）。PvP 关闭时不执行（如实失败），
+   * 生命值过低时停止战斗并撤离求援。
+   */
+  private stepAttack(task: Task, dtMs: number): void {
+    if (!this.pvp.enabled) {
+      this.finish(task, 'failed', 'PvP 已关闭：不主动攻击（开启后才会还手）');
+      this.bot.status = 'idle';
+      return;
+    }
+    if (!this.mob.alive) {
+      this.finish(task, 'failed', '附近没有可攻击的目标');
+      this.bot.status = 'idle';
+      return;
+    }
+    if (this.bot.health <= FLEE_HEALTH) {
+      this.fleeUntil = this.timeMs + FLEE_DURATION_MS * 2;
+      this.finish(task, 'failed', `生命值过低（${this.bot.health}/20）：停止攻击并撤离求援`);
+      this.bot.status = 'moving';
+      return;
+    }
+
+    const dist = Math.hypot(this.mob.x - this.bot.x, this.mob.z - this.bot.z);
+    if (dist > REACH) {
+      this.bot.status = 'moving';
+      const goal = { x: Math.floor(this.mob.x), z: Math.floor(this.mob.z) };
+      const needRepath = this.bot.pathIndex >= this.bot.path.length || this.timeMs >= this.attackRepathAt;
+      if (needRepath) {
+        this.attackRepathAt = this.timeMs + 600;
+        if (!this.setPath(goal)) {
+          task.note = '走不到目标那里（被地形挡住）';
+          task.progress = 0.4;
+          return;
+        }
+      }
+      const state = this.advance(dtMs);
+      if (state === 'blocked') this.attackRepathAt = 0;
+      task.progress = 0.4;
+      task.note = `接近${this.mob.name}（${dist.toFixed(1)} 格外）`;
+      return;
+    }
+
+    this.bot.status = 'fighting';
+    if (this.timeMs < this.nextAttackAt) {
+      task.progress = 0.8;
+      task.note = `正在与${this.mob.name}交战`;
+      return;
+    }
+    this.nextAttackAt = this.timeMs + BOT_ATTACK_COOLDOWN_MS;
+    const downed = this.botAttack();
+    if (downed) {
+      this.finish(task, 'done', `已击退${this.mob.name}（命中 ${this.bot.attacks} 次）`);
+      this.bot.status = 'idle';
+      return;
+    }
+    task.progress = 0.8;
+    task.note = `命中${this.mob.name}（剩余生命 ${this.mob.health}）`;
   }
 
   private stepDeposit(task: Task, dtMs: number): void {

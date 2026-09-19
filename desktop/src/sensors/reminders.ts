@@ -60,6 +60,11 @@ export interface ReminderEngineDeps {
   searchMemory?: (input: SearchMemoryInput) => MemoryHit[];
   now?: () => number;
   quietHours?: QuietHours | null;
+  /**
+   * 静默提醒开关（G-SENSE-04/B-P-03）：开启后抑制**所有**主动提醒；
+   * 关闭时只在 quietHours 时间窗内抑制。默认 false。
+   */
+  quietEnabled?: boolean;
   dedupeWindowMs?: number;
   emit?: (reminder: Reminder) => void;
 }
@@ -69,6 +74,9 @@ export interface ReminderEngine {
   list(): Reminder[];
   cancel(id: string): boolean;
   reset(): void;
+  /** 运行时切换静默开关（立即生效）。 */
+  setQuietEnabled(enabled: boolean): void;
+  quietEnabled(): boolean;
 }
 
 /** 返回首个命中的触发词（未命中返回 null）。 */
@@ -111,6 +119,13 @@ export function createReminderEngine(deps: ReminderEngineDeps = {}): ReminderEng
 
   const reminders: Reminder[] = [];
   let lastOutingAt: number | null = null;
+  let quietEnabled = deps.quietEnabled === true;
+
+  function isSuppressed(timestamp: number): { suppressed: boolean; reason?: string } {
+    if (quietEnabled) return { suppressed: true, reason: 'quiet-mode' };
+    if (quietHours && isQuietNow(timestamp, quietHours)) return { suppressed: true, reason: 'quiet-hours' };
+    return { suppressed: false };
+  }
 
   function cancelOutings(): void {
     for (let i = reminders.length - 1; i >= 0; i -= 1) {
@@ -147,8 +162,9 @@ export function createReminderEngine(deps: ReminderEngineDeps = {}): ReminderEng
       }
 
       const timestamp = now();
-      if (quietHours && isQuietNow(timestamp, quietHours) && options.force !== true) {
-        return emptyOutcome({ triggered: true, suppressed: true, reason: 'quiet-hours' });
+      const quiet = isSuppressed(timestamp);
+      if (quiet.suppressed && options.force !== true) {
+        return emptyOutcome({ triggered: true, suppressed: true, reason: quiet.reason });
       }
 
       if (lastOutingAt !== null && timestamp - lastOutingAt < dedupeWindowMs) {
@@ -213,6 +229,14 @@ export function createReminderEngine(deps: ReminderEngineDeps = {}): ReminderEng
     reset() {
       reminders.length = 0;
       lastOutingAt = null;
+    },
+
+    setQuietEnabled(enabled: boolean) {
+      quietEnabled = enabled;
+    },
+
+    quietEnabled() {
+      return quietEnabled;
     },
   };
 }

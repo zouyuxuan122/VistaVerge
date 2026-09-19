@@ -16,7 +16,7 @@ import {
   type MemoryViewService,
 } from '../../src/plugins/views/memoryView';
 import { ReminderToast } from '../../src/sensors/views/reminderToast';
-import { createRegistry, createMemoryInstallStore, sha256Hex, type IndexEntry } from '../../src/plugins/registry';
+import { createRegistry, createMemoryInstallStore, sha256Hex, type IndexEntry, type InstalledPackage } from '../../src/plugins/registry';
 import type { MemoryHit, MemoryRecord } from '../../src/data/memory';
 import type { Reminder } from '../../src/sensors/reminders';
 
@@ -135,6 +135,7 @@ describe('MarketView', () => {
       install: vi.fn(async () => ({ ok: true })),
       enable: vi.fn(async () => true),
       disable: vi.fn(async () => true),
+      approvePermissions: vi.fn(async () => true),
       uninstall: vi.fn(async () => true),
       lastError: () => null,
     };
@@ -145,6 +146,57 @@ describe('MarketView', () => {
     expect(added.exists()).toBe(true);
     expect(added.text()).toContain('network:weather');
     expect(added.text()).toContain('需重新同意');
+  });
+
+  it('升级新增权限：详情显示待重新同意，点「同意并启用」才启用（G-PLAT-02/B-P-04）', async () => {
+    const entry: IndexEntry = indexEntry('a'.repeat(64), 10, { version: '2.0.0' });
+    const installed: InstalledPackage = {
+      id: entry.id,
+      version: '2.0.0',
+      kind: 'theme',
+      license: 'MIT',
+      permissions: ['memory:read', 'network:weather'],
+      enabled: false,
+      installedAt: NOW,
+      sha256: 'a'.repeat(64),
+      path: `${entry.id}/2.0.0/sakura.json`,
+      source: 'https://index.example/index.json',
+      pendingPermissions: ['network:weather'],
+    };
+    const view: MarketEntryView = {
+      entry,
+      installed,
+      permissionDiff: { added: ['network:weather'], removed: [], unchanged: ['memory:read'] },
+    };
+    const approvePermissions = vi.fn(async () => true);
+    const stub: MarketStore = {
+      executablePluginsOpen: false,
+      sourceUrl: 'https://index.example/index.json',
+      installedCount: () => 1,
+      effectivePermissions: () => [],
+      setSource: vi.fn(),
+      refresh: vi.fn(async () => ({ ok: true, count: 1 })),
+      list: () => [view],
+      select: vi.fn(),
+      selectedId: () => entry.id,
+      selected: () => view,
+      install: vi.fn(async () => ({ ok: true })),
+      enable: vi.fn(async () => false),
+      disable: vi.fn(async () => true),
+      approvePermissions,
+      uninstall: vi.fn(async () => true),
+      lastError: () => null,
+    };
+    const wrapper = mount(MarketView, { props: { store: stub } });
+    await wrapper.find('[data-test="market-refresh"]').trigger('click');
+    await flushPromises();
+
+    expect(wrapper.find('[data-test="market-pending-perm"]').text()).toContain('待重新同意');
+    expect(wrapper.find('[data-test="market-enable"]').exists()).toBe(false);
+
+    await wrapper.find('[data-test="market-approve"]').trigger('click');
+    await flushPromises();
+    expect(approvePermissions).toHaveBeenCalledWith('com.example.sakura');
   });
 
   it('刷新失败时显示错误，不谎报成功', async () => {
@@ -162,6 +214,7 @@ describe('MarketView', () => {
       install: vi.fn(async () => ({ ok: true })),
       enable: vi.fn(async () => true),
       disable: vi.fn(async () => true),
+      approvePermissions: vi.fn(async () => true),
       uninstall: vi.fn(async () => true),
       lastError: () => '索引刷新失败：http',
     };

@@ -23,6 +23,7 @@ import {
   type ManifestKind,
 } from './manifest';
 import { type FetchLike } from '../sensors/weather';
+import { createPersistence } from '../platform/persistence';
 
 export type { FetchLike };
 
@@ -88,6 +89,11 @@ export interface InstalledPackage {
   /** 本地相对路径（含 id/version 前缀，天然隔离命名空间）。 */
   path: string;
   source: string;
+  /**
+   * 升级新增、尚未重新同意的权限（G-PLAT-02/B-P-04）。
+   * 非空时插件保持停用，`enable` 会被拒绝，需用户显式同意后才启用。
+   */
+  pendingPermissions: string[];
 }
 
 export interface InstallStore {
@@ -95,7 +101,10 @@ export interface InstallStore {
   read(path: string): Promise<Uint8Array | null>;
   list(): Promise<InstalledPackage[]>;
   put(record: InstalledPackage): Promise<void>;
+  /** 删除该 id 的安装记录**与全部文件字节**（B-P-05：不留残留字节）。 */
   remove(id: string): Promise<void>;
+  /** 删除单个文件（升级时清理旧版本字节）。 */
+  removePath?(path: string): Promise<void>;
 }
 
 export interface PermissionDiff {
@@ -115,6 +124,8 @@ export interface Registry {
   installFromIndex(indexUrl: string, id: string): Promise<InstalledPackage>;
   enable(id: string): Promise<boolean>;
   disable(id: string): Promise<boolean>;
+  /** 用户重新同意新增权限并启用（G-PLAT-02/B-P-04）。 */
+  approvePermissions(id: string): Promise<boolean>;
   uninstall(id: string): Promise<boolean>;
 }
 
@@ -272,8 +283,17 @@ export async function fetchIndex(
 }
 
 /* ------------------------------------------------------------------ */
-/* 安装存储（内存实现；真实文件落盘由宿主在 EXP-007 接入）              */
+/* 安装存储：内存（测试）与落盘（G-PLAT-01）                            */
 /* ------------------------------------------------------------------ */
+
+/** 兼容旧记录：缺失 pendingPermissions 时补空数组。 */
+function normalizeRecord(record: InstalledPackage): InstalledPackage {
+  return {
+    ...record,
+    permissions: [...(record.permissions ?? [])],
+    pendingPermissions: [...(record.pendingPermissions ?? [])],
+  };
+}
 
 export function createMemoryInstallStore(): InstallStore {
   const files = new Map<string, Uint8Array>();
@@ -287,15 +307,138 @@ export function createMemoryInstallStore(): InstallStore {
       return value ? new Uint8Array(value) : null;
     },
     async list(): Promise<InstalledPackage[]> {
-      return [...records.values()].map((record) => ({ ...record, permissions: [...record.permissions] }));
+      return [...records.values()].map((record) => ({ ...normalizeRecord(record) }));
     },
     async put(record: InstalledPackage): Promise<void> {
-      records.set(record.id, { ...record, permissions: [...record.permissions] });
+      records.set(record.id, normalizeRecord(record));
     },
     async remove(id: string): Promise<void> {
       records.delete(id);
+      // B-P-05：卸载必须连文件字节一起清掉，否则本地目录永久残留。
+      const prefix = `${id}/`;
+      for (const key of [...files.keys()]) {
+        if (key.startsWith(prefix)) files.delete(key);
+      }
+    },
+    async removePath(path: string): Promise<void> {
+      files.delete(path);
     },
   };
+}
+
+/** 落盘格式（单文件 JSON，字节以 base64 保存）。 */
+interface PersistedStoreFile {
+  version: 1;
+  files: Record<string, string>;
+  records: InstalledPackage[];
+}
+
+function bytesToBase64(bytes: Uint8Array): string {
+  let binary = '';
+  const chunk = 0x8000;
+  for (let i = 0; i < bytes.length; i += chunk) {
+    binary += String.fromCharCode(...bytes.subarray(i, i + chunk));
+  }
+  return btoa(binary);
+}
+
+function base64ToBytes(value: string): Uint8Array {
+  const binary = atob(value);
+  const out = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i += 1) out[i] = binary.charCodeAt(i);
+  return out;
+}
+
+/**
+ * 文件落盘安装存储（G-PLAT-01）：重启后已安装插件仍在。
+ * 通过 platform/persistence 的 db_read_file/db_write_file 通道写 app_data_dir，
+ * 与记忆库分文件（`vistaverge-plugins.json`），避免与 data/db 的迁移耦合。
+ */
+export function createPersistentInstallStore(
+  persistence: { read(): Promise<Uint8Array | null>; write(bytes: Uint8Array): Promise<void> },
+): InstallStore {
+  const files = new Map<string, Uint8Array>();
+  const records = new Map<string, InstalledPackage>();
+  let loaded = false;
+
+  async function ensureLoaded(): Promise<void> {
+    if (loaded) return;
+    loaded = true;
+    try {
+      const raw = await persistence.read();
+      if (!raw || raw.byteLength === 0) return;
+      const parsed = JSON.parse(new TextDecoder().decode(raw)) as Partial<PersistedStoreFile>;
+      if (parsed && typeof parsed === 'object') {
+        for (const [path, base64] of Object.entries(parsed.files ?? {})) {
+          if (typeof base64 === 'string') files.set(path, base64ToBytes(base64));
+        }
+        for (const record of parsed.records ?? []) {
+          if (record && typeof record.id === 'string') records.set(record.id, normalizeRecord(record));
+        }
+      }
+    } catch (error) {
+      // 文件损坏：以空状态启动并留下痕迹，不静默假装已安装。
+      console.error('[vistaverge] plugin store read failed:', error);
+    }
+  }
+
+  async function persist(): Promise<void> {
+    const payload: PersistedStoreFile = {
+      version: 1,
+      files: Object.fromEntries([...files.entries()].map(([path, bytes]) => [path, bytesToBase64(bytes)])),
+      records: [...records.values()],
+    };
+    await persistence.write(new TextEncoder().encode(JSON.stringify(payload)));
+  }
+
+  return {
+    async write(path: string, bytes: Uint8Array): Promise<void> {
+      await ensureLoaded();
+      files.set(path, new Uint8Array(bytes));
+      await persist();
+    },
+    async read(path: string): Promise<Uint8Array | null> {
+      await ensureLoaded();
+      const value = files.get(path);
+      return value ? new Uint8Array(value) : null;
+    },
+    async list(): Promise<InstalledPackage[]> {
+      await ensureLoaded();
+      return [...records.values()].map((record) => ({ ...normalizeRecord(record) }));
+    },
+    async put(record: InstalledPackage): Promise<void> {
+      await ensureLoaded();
+      records.set(record.id, normalizeRecord(record));
+      await persist();
+    },
+    async remove(id: string): Promise<void> {
+      await ensureLoaded();
+      records.delete(id);
+      const prefix = `${id}/`;
+      for (const key of [...files.keys()]) {
+        if (key.startsWith(prefix)) files.delete(key);
+      }
+      await persist();
+    },
+    async removePath(path: string): Promise<void> {
+      await ensureLoaded();
+      files.delete(path);
+      await persist();
+    },
+  };
+}
+
+/**
+ * 默认落盘存储：Tauri → app_data_dir 文件；浏览器 dev → IndexedDB；纯 Node → 内存。
+ * 与记忆库分文件，避免与 data/db 的迁移版本耦合。
+ */
+function createDefaultInstallStore(): InstallStore {
+  try {
+    return createPersistentInstallStore(createPersistence('vistaverge-plugins.json'));
+  } catch (error) {
+    console.error('[vistaverge] plugin persistence unavailable, falling back to memory:', error);
+    return createMemoryInstallStore();
+  }
 }
 
 /* ------------------------------------------------------------------ */
@@ -308,7 +451,7 @@ function packagePath(entry: IndexEntry): string {
 
 export function createRegistry(deps: RegistryDeps = {}): Registry {
   const fetchImpl = deps.fetch ?? (globalThis.fetch as unknown as FetchLike | undefined);
-  const store = deps.store ?? createMemoryInstallStore();
+  const store = deps.store ?? createDefaultInstallStore();
   const now = deps.now ?? (() => Date.now());
   const maxPackageBytes = deps.maxPackageBytes ?? MAX_PACKAGE_BYTES;
 
@@ -336,8 +479,17 @@ export function createRegistry(deps: RegistryDeps = {}): Registry {
     if (!response.ok) {
       throw new RegistryError('http', `数据包下载返回 HTTP ${response.status}`);
     }
-    const text = await response.text();
-    return new TextEncoder().encode(text);
+    // B-P-06：优先用 arrayBuffer 直接取字节。text() 会把字节按 UTF-8 解码再重编码，
+    // 非 UTF-8/含多字节内容时字节数会变，导致 size/sha256 误报不一致。
+    if (typeof response.arrayBuffer === 'function') {
+      try {
+        return new Uint8Array(await response.arrayBuffer());
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        throw new RegistryError('http', `数据包读取失败：${message}`);
+      }
+    }
+    return new TextEncoder().encode(await response.text());
   }
 
   async function install(entry: IndexEntry, context: { indexUrl: string }): Promise<InstalledPackage> {
@@ -387,22 +539,36 @@ export function createRegistry(deps: RegistryDeps = {}): Registry {
       );
     }
 
-    // 6) 写入本地目录 + 记录（同 id 覆盖 = 升级）
+    // 6) 升级时的权限差异：新增权限必须重新同意（G-PLAT-02/B-P-04）。
+    await syncCache();
+    const existing = cache.get(entry.id);
+    const before = new Set(existing?.permissions ?? []);
+    const added = entry.permissions.filter((permission) => !before.has(permission));
+    const needsReconsent = existing !== undefined && added.length > 0;
+
+    // 7) 写入本地目录 + 记录（同 id 覆盖 = 升级）
     const path = packagePath(entry);
     await store.write(path, bytes);
+    // 升级换路径：清掉旧版本字节，避免残留（B-P-05 同类问题）。
+    if (existing && existing.path !== path && store.removePath) {
+      await store.removePath(existing.path);
+    }
     const record: InstalledPackage = {
       id: entry.id,
       version: entry.version,
       kind: entry.kind,
       license: entry.license,
       permissions: [...entry.permissions],
-      enabled: true,
+      // 有新增权限的升级包安装后保持停用，等待用户重新同意。
+      enabled: !needsReconsent,
       installedAt: now(),
       sha256: actualSha256,
       path,
       source: context.indexUrl,
+      pendingPermissions: needsReconsent ? added : [],
     };
     await store.put(record);
+    cache.set(record.id, record);
     return record;
   }
 
@@ -455,6 +621,8 @@ export function createRegistry(deps: RegistryDeps = {}): Registry {
       await syncCache();
       const record = cache.get(id);
       if (!record) return false;
+      // G-PLAT-02/B-P-04：有未重新同意的新增权限时拒绝启用。
+      if (record.pendingPermissions.length > 0) return false;
       const next = { ...record, enabled: true };
       await store.put(next);
       cache.set(id, next);
@@ -469,9 +637,20 @@ export function createRegistry(deps: RegistryDeps = {}): Registry {
       cache.set(id, next);
       return true;
     },
+    async approvePermissions(id: string) {
+      await syncCache();
+      const record = cache.get(id);
+      if (!record) return false;
+      // 用户已重新同意：清空待同意权限并启用。
+      const next = { ...record, pendingPermissions: [], enabled: true };
+      await store.put(next);
+      cache.set(id, next);
+      return true;
+    },
     async uninstall(id: string) {
       await syncCache();
       if (!cache.has(id)) return false;
+      // store.remove 同时清理记录与文件字节（B-P-05）。
       await store.remove(id);
       cache.delete(id);
       return true;

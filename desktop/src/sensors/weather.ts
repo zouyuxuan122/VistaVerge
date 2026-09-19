@@ -25,6 +25,11 @@ export interface HttpResponseLike {
   ok: boolean;
   status: number;
   text(): Promise<string>;
+  /**
+   * 原始字节（可选）。数据包下载必须优先用它，避免 text() 的
+   * UTF-8 解码/重编码改变字节数导致 sha256 与 size 误报（B-P-06）。
+   */
+  arrayBuffer?(): Promise<ArrayBuffer>;
 }
 
 export type FetchLike = (

@@ -40,6 +40,8 @@ export interface MarketStore {
   install(id: string): Promise<{ ok: boolean; error?: string }>;
   enable(id: string): Promise<boolean>;
   disable(id: string): Promise<boolean>;
+  /** 用户重新同意升级新增权限并启用（G-PLAT-02/B-P-04）。 */
+  approvePermissions(id: string): Promise<boolean>;
   uninstall(id: string): Promise<boolean>;
   installedCount(): number;
   effectivePermissions(id: string): string[];
@@ -148,6 +150,14 @@ export function createMarketStore(deps: MarketStoreDeps = {}): MarketStore {
 
     async disable(id: string) {
       const ok = await registry.disable(id);
+      installed = await registry.installed();
+      const view = find(id);
+      if (view) view.installed = installed.find((record) => record.id === id) ?? null;
+      return ok;
+    },
+
+    async approvePermissions(id: string) {
+      const ok = await registry.approvePermissions(id);
       installed = await registry.installed();
       const view = find(id);
       if (view) view.installed = installed.find((record) => record.id === id) ?? null;

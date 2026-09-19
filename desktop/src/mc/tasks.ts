@@ -7,7 +7,16 @@
 
 import { COAL_ORE, DIRT, IRON_ORE, LOG, PLANKS, STONE, CRAFTING_TABLE, type BlockId } from './blocks';
 
-export type TaskKind = 'follow' | 'stop' | 'goto' | 'gather' | 'mine' | 'build' | 'craft' | 'deposit';
+export type TaskKind =
+  | 'follow'
+  | 'stop'
+  | 'goto'
+  | 'gather'
+  | 'mine'
+  | 'build'
+  | 'craft'
+  | 'deposit'
+  | 'attack';
 
 export type TaskStatus = 'queued' | 'running' | 'done' | 'failed' | 'cancelled';
 
@@ -65,6 +74,11 @@ const CRAFT_WORDS = ['合成', '制作', '做个', '做一个', '做一', 'craft
 const GATHER_WORDS = ['采集', '收集', '挖点', '砍', '弄点', '帮我拿', 'gather', 'collect', 'chop'];
 const MINE_WORDS = ['挖矿', '采矿', '挖', 'mine', 'dig'];
 const DEPOSIT_WORDS = ['存起来', '放箱子', '收纳', 'deposit'];
+/**
+ * 攻击/反击指令（G-MC-02）。默认保守：即使识别出指令，PvP 开关关闭时
+ * 也不执行（session 层直接拒绝并说明原因），绝不因一句「打他」就自动开打。
+ */
+const ATTACK_WORDS = ['打他', '打它', '打回去', '反击', '揍他', '揍它', '攻击', 'attack', 'retaliate'];
 
 /**
  * 解析自然语言指令为任务。无法识别返回 null（上层不得硬猜成某个任务）。
@@ -100,6 +114,9 @@ export function parseMcCommand(input: string): ParsedCommand | null {
   }
   if (DEPOSIT_WORDS.some((w) => text.includes(w))) {
     return { kind: 'deposit', params: {}, label: '把背包收进箱子' };
+  }
+  if (ATTACK_WORDS.some((w) => text.includes(w))) {
+    return { kind: 'attack', params: { target: 'mob' }, label: '反击敌对生物' };
   }
 
   const block = matchBlock(text);

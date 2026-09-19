@@ -11,6 +11,7 @@ import {
   mcSession,
   resetSimulation,
   setHostile,
+  setPvp,
   setRunning,
   sim,
 } from '../mc/session';
@@ -43,6 +44,7 @@ const quickCommands: { label: string; text: string; hint: string }[] = [
   { label: '合成斧头', text: '合成斧头', hint: '需要工作台 + 木板 + 原木' },
   { label: '挖石头', text: '挖 6 个石头', hint: '需要镐（没有就如实失败）' },
   { label: '搭小屋', text: '搭一间小屋', hint: '按蓝图真实放置方块' },
+  { label: '反击', text: '反击', hint: 'PvP 关闭时不会执行（默认保守，只规避不还手）' },
   { label: '回家', text: '回家', hint: '寻路回出生点' },
   { label: '收纳背包', text: '把背包收进箱子', hint: '清空背包' },
 ];
@@ -90,6 +92,12 @@ const worldStats = computed(() => {
   };
 });
 const hostileOn = computed(() => mcSession.hostile);
+const pvpOn = computed(() => mcSession.pvpEnabled);
+const pvpRetaliate = computed(() => mcSession.pvpRetaliate);
+const mob = computed(() => {
+  void mcSession.revision;
+  return sim.mob;
+});
 
 /** 图例：把地图上的颜色和挖掘代价对应起来（硬度与工具要求都来自方块表）。 */
 const legend = [GRASS, DIRT, STONE, LOG, LEAVES, WATER, COAL_ORE, IRON_ORE, PLANKS].map((id) => BLOCKS[id]);
@@ -343,9 +351,21 @@ function fmtMs(ms: number): string {
         </div>
         <div class="mc-toggles">
           <label><input type="checkbox" :checked="mcSession.running" @change="setRunning(($event.target as HTMLInputElement).checked)" /> 模拟运行中</label>
-          <label><input type="checkbox" :checked="hostileOn" @change="setHostile(($event.target as HTMLInputElement).checked)" /> 受击开关（每 3 秒受 2 点伤害）</label>
+          <label><input type="checkbox" :checked="hostileOn" @change="setHostile(($event.target as HTMLInputElement).checked)" /> 受击开关（敌对生物会靠近并攻击）</label>
+          <label>
+            <input type="checkbox" data-testid="mc-pvp" :checked="pvpOn" @change="setPvp(($event.target as HTMLInputElement).checked, pvpRetaliate)" />
+            PvP 开启（默认关；关时被攻击只规避不还手）
+          </label>
+          <label>
+            <input type="checkbox" data-testid="mc-pvp-retaliate" :checked="pvpRetaliate" :disabled="!pvpOn" @change="setPvp(pvpOn, ($event.target as HTMLInputElement).checked)" />
+            被攻击时自动反击
+          </label>
           <button class="btn" @click="resetSimulation()">重置世界（同 seed）</button>
         </div>
+        <ul class="mc-kv mc-combat">
+          <li><span>敌对生物</span><b data-testid="mc-mob">{{ mob.alive ? `${mob.name}（生命 ${mob.health}/${mob.maxHealth}）` : '已被击退' }}</b></li>
+          <li><span>她的命中次数</span><b>{{ bot.attacks }}</b></li>
+        </ul>
 
         <h3>任务队列 <small>当前：{{ currentTask ? currentTask.label : '无' }}</small></h3>
         <ul class="mc-tasks" v-if="runningTasks.length">
@@ -371,3 +391,19 @@ function fmtMs(ms: number): string {
     </div>
   </div>
 </template>
+
+<style scoped>
+.mc-combat {
+  margin-top: 8px;
+}
+.mc-combat li {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+}
+.mc-toggles label {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+</style>

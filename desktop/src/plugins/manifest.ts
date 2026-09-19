@@ -22,6 +22,7 @@ export type ManifestKind = (typeof SUPPORTED_KINDS)[number];
 export type ManifestErrorCode =
   | 'not-object'
   | 'missing-field'
+  | 'invalid-field'
   | 'invalid-id'
   | 'invalid-version'
   | 'invalid-sdk-range'
@@ -232,7 +233,9 @@ function requireString(
   }
   const value = source[field];
   if (typeof value !== 'string') {
-    throw new ManifestError('invalid-license', `manifest.${field} 必须是字符串`, field);
+    // B-P-08：类型错误用通用 invalid-field，并按 field 区分；
+    // 之前一律抛 invalid-license，会把 id/version 的类型错误误导成许可证问题。
+    throw new ManifestError('invalid-field', `manifest.${field} 必须是字符串`, field);
   }
   if (value.length > maxLength) {
     throw new ManifestError('field-too-long', `manifest.${field} 超出长度上限 ${maxLength}`, field);
@@ -248,7 +251,7 @@ function optionalString(
   const value = source[field];
   if (value === undefined || value === null) return undefined;
   if (typeof value !== 'string') {
-    throw new ManifestError('field-too-long', `manifest.${field} 必须是字符串`, field);
+    throw new ManifestError('invalid-field', `manifest.${field} 必须是字符串`, field);
   }
   if (value.length > maxLength) {
     throw new ManifestError('field-too-long', `manifest.${field} 超出长度上限 ${maxLength}`, field);

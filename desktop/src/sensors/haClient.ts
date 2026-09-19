@@ -38,6 +38,20 @@ export interface HaTemperatureReading {
   observedAt: number;
 }
 
+export interface HaIlluminanceReading {
+  lux: number | null;
+  available: boolean;
+  observedAt: number;
+}
+
+export interface HaServiceResult {
+  ok: boolean;
+  /** 失败原因（未配置/未连接/服务端拒绝），如实返回，不伪报成功。 */
+  error?: string;
+  /** 服务端原始返回（成功时）。 */
+  result?: unknown;
+}
+
 export interface WebSocketLike {
   readyState: number;
   send(data: string): void;
@@ -64,6 +78,12 @@ export interface HaClient {
   getStates(): Promise<HaEntityState[]>;
   read(entityId: string): Promise<HaEntityState | null>;
   readTemperature(entityId: string): Promise<HaTemperatureReading | null>;
+  readIlluminance(entityId: string): Promise<HaIlluminanceReading | null>;
+  /**
+   * 家居控制（写 WebSocket 命令，DOMAIN_PLUGINS §3.4）。
+   * 本方法只负责协议调用；**授权门在 perceptionStore**（默认关闭 + 每次显式确认）。
+   */
+  callService(domain: string, service: string, serviceData?: Record<string, unknown>): Promise<HaServiceResult>;
   subscribe(listener: (state: HaEntityState) => void): Promise<() => void>;
 }
 
@@ -295,6 +315,41 @@ export function createHaClient(config: HaConfig, deps: HaClientDeps = {}): HaCli
         available: true,
         observedAt: state.observedAt,
       };
+    },
+
+    async readIlluminance(entityId: string) {
+      const state = stateCache.get(entityId);
+      if (!state) return null;
+      if (!state.available) {
+        return { lux: null, available: false, observedAt: state.observedAt };
+      }
+      // 照度：HA 常见为 attributes.illuminance（sensor 的 state 也是数值字符串）。
+      const fromAttrs = numberOrNull(state.attributes.illuminance ?? state.attributes.lux);
+      const fromState = numberOrNull(Number(state.state));
+      return {
+        lux: fromAttrs ?? fromState,
+        available: true,
+        observedAt: state.observedAt,
+      };
+    },
+
+    async callService(domain: string, service: string, serviceData: Record<string, unknown> = {}) {
+      if (!configured) {
+        return { ok: false, error: HA_BLOCKED_REASON };
+      }
+      if (status !== 'connected') {
+        return { ok: false, error: `HA 未连接（当前状态 ${status}），控制未执行` };
+      }
+      try {
+        const result = await request('call_service', {
+          domain,
+          service,
+          service_data: serviceData,
+        });
+        return { ok: true, result };
+      } catch (error) {
+        return { ok: false, error: error instanceof Error ? error.message : String(error) };
+      }
     },
 
     async subscribe(listener: (state: HaEntityState) => void) {

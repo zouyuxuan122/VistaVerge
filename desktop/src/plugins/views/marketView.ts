@@ -96,6 +96,7 @@ export const MarketView = defineComponent({
       }
 
       const buttons: ReturnType<typeof h>[] = [];
+      const pending = installed?.pendingPermissions ?? [];
       if (!installed) {
         buttons.push(
           h('button', { 'data-test': 'market-install', onClick: () => run(() => store.install(entry.id)) }, '安装'),
@@ -103,6 +104,25 @@ export const MarketView = defineComponent({
       } else if (installed.enabled) {
         buttons.push(
           h('button', { 'data-test': 'market-disable', onClick: () => run(() => store.disable(entry.id)) }, '停用（撤销权限）'),
+        );
+        buttons.push(
+          h('button', { 'data-test': 'market-uninstall', onClick: () => run(() => store.uninstall(entry.id)) }, '卸载'),
+        );
+      } else if (pending.length > 0) {
+        // G-PLAT-02/B-P-04：升级新增权限后保持停用，用户确认后才能启用。
+        children.push(
+          h(
+            'p',
+            { 'data-test': 'market-pending-perm', class: 'market-pending-perm' },
+            `新增权限待重新同意：${pending.join(', ')}（同意前保持停用，权限未生效）`,
+          ),
+        );
+        buttons.push(
+          h(
+            'button',
+            { 'data-test': 'market-approve', onClick: () => run(() => store.approvePermissions(entry.id)) },
+            '同意并启用',
+          ),
         );
         buttons.push(
           h('button', { 'data-test': 'market-uninstall', onClick: () => run(() => store.uninstall(entry.id)) }, '卸载'),

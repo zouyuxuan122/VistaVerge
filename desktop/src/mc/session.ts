@@ -9,7 +9,7 @@
  */
 
 import { reactive } from 'vue';
-import { McSimulation, type McEvent, type SimOptions } from './sim';
+import { McSimulation, type McEvent, type McNoticeKind, type SimOptions } from './sim';
 import { parseMcCommand, type ParsedCommand, type Task } from './tasks';
 
 export const MC_SIMULATED_NOTICE = '本地模拟世界（SIMULATED）：地形/寻路/挖掘/合成/搭建都是真实计算，不播放预设动画。';
@@ -21,9 +21,12 @@ export interface McSessionState {
   elapsedMs: number;
   /** 最近一次指令解析结果说明（让「为什么不执行」可见）。 */
   lastParseNote: string;
-  tickHz: number;
   /** 受击开关。放在响应式状态里：模拟器本体不是响应式的，UI 需要一份可订阅的镜像。 */
   hostile: boolean;
+  /** PvP 主动攻击开关（默认关）。 */
+  pvpEnabled: boolean;
+  /** 被攻击时是否自动反击（仅在 pvpEnabled 时生效）。 */
+  pvpRetaliate: boolean;
   /**
    * UI 重绘计数。模拟器（McSimulation）是普通类实例，不是 reactive 对象，
    * 依赖它的 computed 不会自动重算；面板靠这个计数在每个渲染节拍上刷新。
@@ -35,24 +38,51 @@ export const mcSession = reactive<McSessionState>({
   running: true,
   elapsedMs: 0,
   lastParseNote: '',
-  tickHz: 30,
   hostile: false,
+  pvpEnabled: false,
+  pvpRetaliate: false,
   revision: 0,
 });
 
+/**
+ * MC 事件挂载点（G-MC-02/P2）：前台注册后，任务完成/失败、被打反击、死亡
+ * 会以摘要文本回调，供接到对话播报（会话层不 import store，避免环依赖）。
+ */
+export interface McEventListener {
+  onTaskCompleted?: (summary: string) => void;
+}
+
+let mcEventListener: McEventListener = {};
+
+/** 注册/清空 MC 事件监听（传 {} 或 null 即清空）。 */
+export function setMcEventListener(listener: McEventListener | null): void {
+  mcEventListener = listener ?? {};
+}
+
+function emitMcNotice(_kind: McNoticeKind, summary: string): void {
+  mcEventListener.onTaskCompleted?.(summary);
+}
+
 export function createSimulation(options: SimOptions = {}): McSimulation {
-  return new McSimulation(options);
+  const created = new McSimulation(options);
+  // 事件出口在此接线，reset() 不覆盖 onNotice。
+  created.onNotice = (kind, summary) => emitMcNotice(kind, summary);
+  return created;
 }
 
 /** 应用共享的模拟实例（面板与聊天共用同一个世界）。 */
 export const sim = createSimulation();
 
-/** 重置为同一 seed 的全新世界（验收可复现）。 */
+/** 重置为同一 seed 的全新世界（验收可复现），并保留事件挂载点。 */
 export function resetSimulation(options: SimOptions = {}): void {
-  const fresh = createSimulation(options);
-  Object.assign(sim, fresh);
+  // 原地重置而不是 Object.assign(sim, fresh)：后者会把实例级挂载点（onNotice）
+  // 一并覆盖掉，属于 B-P-09 登记的脆弱写法。
+  sim.reset(options);
   mcSession.elapsedMs = 0;
   mcSession.lastParseNote = '世界已重置（同 seed 可复现）';
+  mcSession.hostile = sim.hostile;
+  mcSession.pvpEnabled = sim.pvp.enabled;
+  mcSession.pvpRetaliate = sim.pvp.retaliate;
 }
 
 /**
@@ -77,11 +107,16 @@ export function maybeHandleMcCommand(text: string): boolean {
  * 面板按钮与聊天共用同一条入队路径。
  * 「停止」是急停而不是一个待办任务：只清空队列，不再往队列里塞一条 stop
  * （否则刚清完的队列里立刻又有一条 queued，与「已停止」自相矛盾）。
+ * 攻击指令在 PvP 关闭时直接拒绝（默认保守，不因一句「打他」就自动开打）。
  */
 export function applyCommand(command: ParsedCommand): Task | null {
   if (command.kind === 'stop') {
     sim.cancelAll();
     mcSession.lastParseNote = `已执行：${command.label}`;
+    return null;
+  }
+  if (command.kind === 'attack' && !sim.pvp.enabled) {
+    mcSession.lastParseNote = 'PvP 已关闭：不主动攻击（先在面板开启 PvP 才可反击）';
     return null;
   }
   const task = sim.enqueue(command);
@@ -107,7 +142,17 @@ export function setRunning(running: boolean): void {
 export function setHostile(enabled: boolean): void {
   sim.hostile = enabled;
   mcSession.hostile = enabled;
-  mcSession.lastParseNote = enabled ? '受击开关已开启（每 3 秒受 2 点伤害）' : '受击开关已关闭';
+  mcSession.lastParseNote = enabled ? '受击开关已开启（敌对生物会靠近并攻击）' : '受击开关已关闭';
 }
 
-export type { McEvent, Task, ParsedCommand };
+/** 切换 PvP（DOMAIN_PLUGINS §3.3）：默认关；关闭时不主动攻击，只规避。 */
+export function setPvp(enabled: boolean, retaliate = mcSession.pvpRetaliate): void {
+  sim.setPvp(enabled, retaliate);
+  mcSession.pvpEnabled = sim.pvp.enabled;
+  mcSession.pvpRetaliate = sim.pvp.retaliate;
+  mcSession.lastParseNote = sim.pvp.enabled
+    ? `PvP 已开启（${sim.pvp.retaliate ? '被攻击时自动反击' : '仅按指令攻击'}）`
+    : 'PvP 已关闭：不主动攻击，被攻击时只规避';
+}
+
+export type { McEvent, McNoticeKind, Task, ParsedCommand };
