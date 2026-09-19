@@ -311,8 +311,3 @@ export function createDbStudyStore(db?: Db): StudyStore {
     },
   };
 }
-
-/** 复习事件（复盘/审计用）。 */
-export function reviewEvent(item: ReviewItem, now: number): { type: 'review.scheduled'; at: number; itemId: string; dueAt: number } {
-  return { type: 'review.scheduled', at: now, itemId: item.id, dueAt: item.dueAt };
-}

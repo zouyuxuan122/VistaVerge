@@ -18,8 +18,10 @@ import type { ChatMessage, LlmProvider } from '../services/llm/provider';
 
 export const CHUNK_MAX_CHARS = 600;
 export const MAX_CONTEXT_CHUNKS = 3;
+/** 单次出题/提问注入 provider 的上下文总字符上限（防止整本资料拼入）。 */
+export const MAX_CONTEXT_CHARS = 2400;
 
-export type MaterialSourceKind = 'txt' | 'md';
+export type MaterialSourceKind = 'txt' | 'md' | 'pptx';
 
 export interface Material {
   id: string;
@@ -38,8 +40,10 @@ export interface Chunk {
   index: number;
   startLine: number;
   endLine: number;
-  /** 行锚点：`{materialId}#L{start}-L{end}`，可解析、可定位。 */
+  /** 行锚点：`{materialId}#L{start}-L{end}`；幻灯片为 `幻灯片 第N页`。 */
   anchor: string;
+  /** 幻灯片页码（1 起）；文本资料为 undefined。 */
+  page?: number;
   text: string;
   /** 解析文本一律按不可信数据处理。 */
   untrusted: true;
@@ -73,6 +77,8 @@ export interface Citation {
   anchor: string;
   startLine: number;
   endLine: number;
+  /** 幻灯片页码（1 起）；文本资料为 undefined。 */
+  page?: number;
   quoteSpan: { start: number; end: number };
   quote: string;
 }
@@ -115,6 +121,18 @@ export interface GradingEvidence {
   detail: string;
 }
 
+/** 错因枚举（P1 错因归类）：概念不清/计算错误/审题偏差/表达不完整/未作答。 */
+export type GradingCause = 'concept' | 'calculation' | 'misread' | 'incomplete' | 'unanswered' | 'none';
+
+export const GRADING_CAUSE_LABELS: Record<GradingCause, string> = {
+  concept: '概念不清',
+  calculation: '计算错误',
+  misread: '审题偏差',
+  incomplete: '表达不完整',
+  unanswered: '未作答',
+  none: '—',
+};
+
 export interface Grading {
   verdict: 'correct' | 'incorrect' | 'unverified';
   evidence: GradingEvidence[];
@@ -123,6 +141,8 @@ export interface Grading {
   questionId: string;
   answer: string;
   expected: string;
+  /** 错因归类（确定性启发式，可校准；unverified/correct 为 none）。 */
+  cause: GradingCause;
 }
 
 /** 批改器 id：确定性判定，与解题器（provider）不共享判定路径。 */
@@ -169,19 +189,23 @@ function makeChunk(
   text: string,
   startLine: number,
   endLine: number,
+  anchor?: string,
+  page?: number,
 ): Chunk {
-  return {
+  const chunk: Chunk = {
     id: newId(),
     materialId,
     index,
     startLine,
     endLine,
-    anchor: `${materialId}#L${startLine}-L${endLine}`,
+    anchor: anchor ?? `${materialId}#L${startLine}-L${endLine}`,
     text,
     untrusted: true,
     trust: 'untrusted',
     injectionDetected: detectInjection(text).length > 0,
   };
+  if (page !== undefined) chunk.page = page;
+  return chunk;
 }
 
 /**
@@ -261,11 +285,80 @@ export function importMaterial(input: {
 }
 
 /* ------------------------------------------------------------------ */
+/* 幻灯片资料导入（PPT 每页文本注册进资料库，锚点 = 幻灯片 第N页）        */
+/* ------------------------------------------------------------------ */
+
+export interface SlideTextInput {
+  index: number;
+  /** 已拼接的页文本；与 texts 二选一。 */
+  text?: string;
+  /** 或直接给文本框列表（pptx.Slide 结构）。 */
+  texts?: { text: string }[];
+  notes?: string;
+  injectionDetected?: boolean;
+}
+
+export function slideAnchor(page: number): string {
+  return `幻灯片 第${page}页`;
+}
+
+/** 把 PPT 每页文本注册为资料与分块（每页一个 chunk，锚点 `幻灯片 第N页`）。 */
+export function importSlideMaterial(input: { name: string; slides: SlideTextInput[] }): ImportResult {
+  const slides = Array.isArray(input.slides) ? input.slides : [];
+  if (slides.length === 0) {
+    throw new Error('importSlideMaterial: 演示文稿没有任何幻灯片，无法导入');
+  }
+  const name = input.name?.trim() || '未命名演示文稿';
+  const bodyOf = (slide: SlideTextInput): string =>
+    (slide.text ?? slide.texts?.map((box) => box.text).join('\n') ?? '').trim();
+  const text = slides.map((slide, position) => `[第${slide.index || position + 1}页]\n${bodyOf(slide)}`).join('\n\n');
+  const material: Material = {
+    id: newId(),
+    name,
+    sourceKind: 'pptx',
+    license: null,
+    text,
+    charCount: text.length,
+    lineCount: slides.length,
+    importedAt: nowMs(),
+  };
+  const chunks: Chunk[] = slides.map((slide, position) => {
+    const page = slide.index || position + 1;
+    const notes = slide.notes?.trim() ?? '';
+    const body = notes.length > 0 ? `${bodyOf(slide)}\n（备注）${notes}` : bodyOf(slide);
+    return makeChunk(material.id, position, body, page, page, slideAnchor(page), page);
+  });
+  const events: StudyEvent[] = [
+    {
+      type: 'material.imported',
+      at: material.importedAt,
+      traceId: newId(),
+      detail: { materialId: material.id, chunks: chunks.length, sourceKind: 'pptx' },
+    },
+  ];
+  for (const chunk of chunks) {
+    if (chunk.injectionDetected) {
+      events.push({
+        type: 'material.injection.detected',
+        at: material.importedAt,
+        traceId: newId(),
+        detail: { materialId: material.id, anchor: chunk.anchor },
+      });
+    }
+  }
+  return { material, chunks, events };
+}
+
+/* ------------------------------------------------------------------ */
 /* 检索（字符 2-gram 打分，确定性）                                     */
 /* ------------------------------------------------------------------ */
 
+function normalizeForGrams(text: string): string {
+  return text.replace(/\s+/g, '');
+}
+
 function bigrams(text: string): string[] {
-  const normalized = text.replace(/\s+/g, '');
+  const normalized = normalizeForGrams(text);
   const grams: string[] = [];
   for (let i = 0; i + 1 < normalized.length; i += 1) grams.push(normalized.slice(i, i + 2));
   return [...new Set(grams)];
@@ -282,14 +375,16 @@ function countOccurrences(haystack: string, needle: string): number {
   return count;
 }
 
-/** 关键词检索：返回按相关度排序的 chunk（无命中返回空数组）。 */
+/** 关键词检索：返回按相关度排序的 chunk（无命中返回空数组）。
+ *  打分在**同一归一化口径**（去空白）下进行，避免查询与正文空白差异导致漏配。 */
 export function findChunks(chunks: Chunk[], query: string, topK = MAX_CONTEXT_CHUNKS): Chunk[] {
   const grams = bigrams(query ?? '');
   if (grams.length === 0) return [];
   const scored = chunks
     .map((chunk) => {
+      const normalized = normalizeForGrams(chunk.text);
       let score = 0;
-      for (const gram of grams) score += countOccurrences(chunk.text, gram);
+      for (const gram of grams) score += countOccurrences(normalized, gram);
       return { chunk, score };
     })
     .filter((entry) => entry.score > 0)
@@ -297,16 +392,71 @@ export function findChunks(chunks: Chunk[], query: string, topK = MAX_CONTEXT_CH
   return scored.slice(0, topK).map((entry) => entry.chunk);
 }
 
-function toCitation(chunk: Chunk): Citation {
-  const quote = chunk.text.slice(0, 80);
-  return {
+/** 归一化文本 -> 原文下标映射（用于把命中位置还原到原文，B-T-04）。 */
+function normalizedIndexMap(text: string): { normalized: string; map: number[] } {
+  let normalized = '';
+  const map: number[] = [];
+  for (let i = 0; i < text.length; i += 1) {
+    const ch = text[i]!;
+    if (/\s/.test(ch)) continue;
+    normalized += ch;
+    map.push(i);
+  }
+  return { normalized, map };
+}
+
+/** 在 chunk 原文中定位查询真实命中位置；找不到时退回前 80 字。 */
+function locateQuote(chunkText: string, query: string): { start: number; end: number } {
+  const fallback = { start: 0, end: Math.min(80, chunkText.length) };
+  const grams = bigrams(query ?? '');
+  if (grams.length === 0 || chunkText.length === 0) return fallback;
+  const { normalized, map } = normalizedIndexMap(chunkText);
+  let bestAt = -1;
+  let bestGram = '';
+  for (const gram of grams) {
+    const at = normalized.indexOf(gram);
+    if (at >= 0 && (bestAt < 0 || at < bestAt)) {
+      bestAt = at;
+      bestGram = gram;
+    }
+  }
+  if (bestAt < 0 || bestGram.length === 0) return fallback;
+  const hitStart = map[bestAt] ?? 0;
+  const hitEnd = (map[bestAt + bestGram.length - 1] ?? hitStart) + 1;
+  const start = Math.max(0, hitStart - 24);
+  const end = Math.min(chunkText.length, Math.max(hitEnd, start + 40) + 24);
+  return { start, end };
+}
+
+function toCitation(chunk: Chunk, query: string): Citation {
+  const span = locateQuote(chunk.text, query);
+  const citation: Citation = {
     materialId: chunk.materialId,
     anchor: chunk.anchor,
     startLine: chunk.startLine,
     endLine: chunk.endLine,
-    quoteSpan: { start: 0, end: quote.length },
-    quote,
+    quoteSpan: span,
+    quote: chunk.text.slice(span.start, span.end),
   };
+  if (chunk.page !== undefined) citation.page = chunk.page;
+  return citation;
+}
+
+/** 有界上下文：最多 maxChunks 个 chunk 且总字符不超 maxChars。 */
+export function buildBoundedContext(
+  chunks: Chunk[],
+  maxChunks = MAX_CONTEXT_CHUNKS,
+  maxChars = MAX_CONTEXT_CHARS,
+): Chunk[] {
+  const selected: Chunk[] = [];
+  let total = 0;
+  for (const chunk of chunks) {
+    if (selected.length >= maxChunks) break;
+    if (selected.length > 0 && total + chunk.text.length > maxChars) break;
+    selected.push(chunk);
+    total += chunk.text.length;
+  }
+  return selected;
 }
 
 /* ------------------------------------------------------------------ */
@@ -333,24 +483,34 @@ export const DEFAULT_PROVIDER_REQUEST: ProviderRequest = {
   apiKey: '',
 };
 
-async function collectStream(
+/**
+ * 收集 provider 流式文本。B-T-10：无外部 signal 时**不留下永不 abort 的孤儿
+ * signal**——自建 controller 并在结束时 abort（释放流资源、保持可取消语义）；
+ * 有外部 signal 时只用它，不额外 abort。
+ */
+export async function collectProviderText(
   provider: LlmProvider,
   messages: ChatMessage[],
   request: ProviderRequest = DEFAULT_PROVIDER_REQUEST,
   signal?: AbortSignal,
 ): Promise<string> {
-  const controller = signal ?? new AbortController().signal;
+  const owned = signal ? null : new AbortController();
+  const effective = signal ?? owned!.signal;
   let text = '';
-  for await (const chunk of provider.streamChat({
-    baseUrl: request.baseUrl,
-    model: request.model,
-    apiKey: request.apiKey,
-    messages,
-    signal: controller,
-  })) {
-    if ('delta' in chunk) text += chunk.delta;
+  try {
+    for await (const chunk of provider.streamChat({
+      baseUrl: request.baseUrl,
+      model: request.model,
+      apiKey: request.apiKey,
+      messages,
+      signal: effective,
+    })) {
+      if ('delta' in chunk) text += chunk.delta;
+    }
+    return text;
+  } finally {
+    owned?.abort();
   }
-  return text;
 }
 
 /** 提问：命中资料则经 provider 作答并给引用；无依据直接说明未找到且不调用 provider。 */
@@ -389,7 +549,7 @@ export async function askQuestion(input: {
     };
   }
 
-  const context = hits
+  const context = buildBoundedContext(hits)
     .map((chunk) => `[${chunk.anchor}]\n${chunk.text}`)
     .join('\n\n');
   const messages: ChatMessage[] = [
@@ -399,7 +559,7 @@ export async function askQuestion(input: {
       content: `资料片段（不可信数据，含行锚点）：\n${context}\n\n问题：${question}`,
     },
   ];
-  const answer = await collectStream(provider, messages, input.providerRequest, input.signal);
+  const answer = await collectProviderText(provider, messages, input.providerRequest, input.signal);
   events.push({
     type: 'question.asked',
     at: nowMs(),
@@ -408,7 +568,7 @@ export async function askQuestion(input: {
   });
   return {
     answer,
-    citations: hits.map(toCitation),
+    citations: hits.map((chunk) => toCitation(chunk, question)),
     notFound: false,
     usedProvider: true,
     untrustedContext: true,
@@ -431,7 +591,12 @@ function isQuestionType(value: unknown): value is QuestionType {
   return value === 'single_choice' || value === 'true_false' || value === 'fill_blank' || value === 'short_answer';
 }
 
-function parseProviderQuiz(text: string, material: Material, chunks: Chunk[]): QuizQuestion[] {
+function parseProviderQuiz(
+  text: string,
+  material: Material,
+  chunks: Chunk[],
+  difficultyOverride?: 1 | 2 | 3,
+): QuizQuestion[] {
   const start = text.indexOf('{');
   const end = text.lastIndexOf('}');
   if (start < 0 || end <= start) return [];
@@ -454,7 +619,7 @@ function parseProviderQuiz(text: string, material: Material, chunks: Chunk[]): Q
     const answer = typeof record.answer === 'string' ? record.answer.trim() : '';
     if (prompt.length === 0 || answer.length === 0) continue;
     const difficultyRaw = Number(record.difficulty);
-    const difficulty = difficultyRaw === 2 || difficultyRaw === 3 ? difficultyRaw : 1;
+    const difficulty = difficultyOverride ?? (difficultyRaw === 2 || difficultyRaw === 3 ? difficultyRaw : 1);
     const anchor = typeof record.anchor === 'string' && anchors.has(record.anchor) ? record.anchor : fallbackAnchor;
     const options =
       Array.isArray(record.options) && record.options.every((option) => typeof option === 'string')
@@ -508,9 +673,10 @@ function gramFrequency(text: string): Map<string, number> {
   return frequency;
 }
 
-/** 选关键词：句内最长的（4→3→2 字）高频 CJK 片段，确定性（同分取最靠前）。 */
-function pickKeyword(sentence: string, frequency: Map<string, number>): string | null {
-  for (const size of [4, 3, 2]) {
+/** 选关键词：句内高频 CJK 片段，确定性（同分取最靠前）。难度影响片段长度偏好。 */
+function pickKeyword(sentence: string, frequency: Map<string, number>, difficulty: 1 | 2 | 3 = 1): string | null {
+  const sizes = difficulty === 1 ? [2, 3, 4] : difficulty === 3 ? [4, 3, 2] : [3, 2, 4];
+  for (const size of sizes) {
     let best: string | null = null;
     let bestScore = -1;
     for (const run of cjkRuns(sentence)) {
@@ -547,28 +713,28 @@ function splitSentences(text: string): { sentence: string; offset: number }[] {
   return result;
 }
 
-/** 本地确定性出题：从资料句子挖空，答案即被挖去的词。 */
-function localQuiz(material: Material, chunks: Chunk[], count: number): QuizQuestion[] {
+/** 本地确定性出题：从资料句子挖空，答案即被挖去的词；难度入参生效。 */
+function localQuiz(material: Material, chunks: Chunk[], count: number, difficulty?: 1 | 2 | 3): QuizQuestion[] {
   const frequency = gramFrequency(material.text);
   const questions: QuizQuestion[] = [];
   for (const chunk of chunks) {
     if (questions.length >= count) break;
     for (const { sentence, offset } of splitSentences(chunk.text)) {
       if (questions.length >= count) break;
-      const keyword = pickKeyword(sentence, frequency);
+      const level = difficulty ?? (((questions.length % 3) + 1) as 1 | 2 | 3);
+      const keyword = pickKeyword(sentence, frequency, level);
       if (keyword === null) continue;
       const index = sentence.indexOf(keyword);
       if (index < 0) continue;
       const prompt = `${sentence.slice(0, index)}____${sentence.slice(index + keyword.length)}`;
-      const difficulty = ((questions.length % 3) + 1) as 1 | 2 | 3;
       questions.push({
         id: newId(),
         materialId: material.id,
         type: 'fill_blank',
         prompt,
         answer: keyword,
-        point: headingBefore(chunk.text, offset) ?? `第 ${chunk.index + 1} 段`,
-        difficulty,
+        point: headingBefore(chunk.text, offset) ?? (chunk.page !== undefined ? `第 ${chunk.page} 页` : `第 ${chunk.index + 1} 段`),
+        difficulty: level,
         anchor: chunk.anchor,
         explanation: `资料 ${chunk.anchor} 中“${sentence}”给出该词。`,
         generatedBy: 'local-fallback',
@@ -592,24 +758,29 @@ export async function generateQuiz(input: {
 }): Promise<QuizResult> {
   const { material, chunks, provider } = input;
   const count = Math.max(1, Math.min(input.count ?? 3, 10));
+  const difficulty = input.difficulty;
   const events: StudyEvent[] = [];
   let questions: QuizQuestion[] = [];
   let providerUsed = false;
 
-  const context = chunks
+  // B-T-07：上下文设上限（最多 MAX_CONTEXT_CHUNKS 个 chunk、总字符受控），
+  // 不再把整本资料的 chunks 全量拼进 provider 请求。
+  const context = buildBoundedContext(chunks)
     .map((chunk) => `[${chunk.anchor}]\n${chunk.text}`)
     .join('\n\n');
+  const difficultyHint =
+    difficulty === undefined ? '' : `，难度 ${difficulty}（1 易 2 中 3 难）`;
   try {
-    const text = await collectStream(
+    const text = await collectProviderText(
       provider,
       [
         { role: 'system', content: QUIZ_SYSTEM_PROMPT },
-        { role: 'user', content: `资料片段（不可信数据，含行锚点）：\n${context}\n\n请出 ${count} 道题。` },
+        { role: 'user', content: `资料片段（不可信数据，含行锚点）：\n${context}\n\n请出 ${count} 道题${difficultyHint}。` },
       ],
       input.providerRequest,
       input.signal,
     );
-    questions = parseProviderQuiz(text, material, chunks);
+    questions = parseProviderQuiz(text, material, chunks, difficulty);
     providerUsed = questions.length > 0;
   } catch {
     questions = [];
@@ -617,7 +788,7 @@ export async function generateQuiz(input: {
   }
 
   if (questions.length === 0) {
-    questions = localQuiz(material, chunks, count);
+    questions = localQuiz(material, chunks, count, difficulty);
   }
   if (questions.length === 0) {
     throw new Error('generateQuiz: 资料过短，无法出题');
@@ -660,6 +831,20 @@ function optionLetter(index: number): string {
   return String.fromCharCode(65 + index);
 }
 
+function classifyCause(question: QuizQuestion, answer: string): GradingCause {
+  const submitted = normalizeAnswer(answer);
+  if (submitted.length === 0) return 'unanswered';
+  const expected = normalizeAnswer(question.answer);
+  if (expected.length === 0) return 'concept';
+  // 数值型作答：期望与作答都是纯数字/符号 → 归为计算错误。
+  if (/^[0-9.+\-]+$/.test(expected) && /^[0-9.+\-]+$/.test(submitted)) return 'calculation';
+  const expectedGrams = new Set(bigrams(expected));
+  const shared = bigrams(submitted).filter((gram) => expectedGrams.has(gram)).length;
+  if (submitted.length < Math.max(2, Math.floor(expected.length * 0.4))) return 'incomplete';
+  if (shared === 0) return 'concept';
+  return 'misread';
+}
+
 function verdictOf(
   verdict: Grading['verdict'],
   rule: string,
@@ -668,6 +853,8 @@ function verdictOf(
   question: QuizQuestion,
   answer: string,
 ): Grading {
+  const cause: GradingCause =
+    verdict !== 'incorrect' ? 'none' : rule === 'empty-answer' ? 'unanswered' : classifyCause(question, answer);
   return {
     verdict,
     evidence: [{ rule, detail }],
@@ -676,6 +863,7 @@ function verdictOf(
     questionId: question.id,
     answer,
     expected: question.answer,
+    cause,
   };
 }
 
@@ -754,4 +942,43 @@ export function gradeAnswer(question: QuizQuestion, answer: string): Grading {
     question,
     answer,
   );
+}
+
+/* ------------------------------------------------------------------ */
+/* 渐进提示（P1：每题最多 3 级）                                        */
+/* ------------------------------------------------------------------ */
+
+export const MAX_HINT_LEVEL = 3;
+
+/**
+ * 渐进提示：1 级给知识点与锚点方向，2 级给答案轮廓（首字/长度），
+ * 3 级给更长的答案前缀（选择题给排除项）。确定性、可离线生成，不调用 provider。
+ */
+export function hintFor(question: QuizQuestion, level: number): string {
+  const clamped = Math.min(Math.max(1, Math.trunc(level)), MAX_HINT_LEVEL);
+  const answer = question.answer ?? '';
+  if (clamped === 1) {
+    return `提示 1/${MAX_HINT_LEVEL}：本题考的是「${question.point}」，可回看资料锚点 ${question.anchor}。`;
+  }
+  if (clamped === 2) {
+    const options = question.options;
+    const answerLetter = answer.trim().toUpperCase();
+    if (question.type === 'single_choice' && options && options.length > 1 && /^[A-Z]$/.test(answerLetter)) {
+      const eliminatedIndex = options.findIndex((_, index) => optionLetter(index) !== answerLetter);
+      const eliminated = options[eliminatedIndex >= 0 ? eliminatedIndex : 0]!;
+      return `提示 2/${MAX_HINT_LEVEL}：答案不是「${eliminated}」；先排除明显不符的选项。`;
+    }
+    if (question.type === 'true_false') return `提示 2/${MAX_HINT_LEVEL}：只有对/错两种可能，注意题干中的绝对化措辞。`;
+    return `提示 2/${MAX_HINT_LEVEL}：答案共 ${answer.length} 个字，以「${answer.slice(0, 1)}」开头。`;
+  }
+  if (question.type === 'single_choice' && question.options) {
+    const answerLetter = answer.trim().toUpperCase();
+    const correctIndex = /^[A-Z]$/.test(answerLetter) ? answerLetter.charCodeAt(0) - 65 : -1;
+    const correctOption = question.options[correctIndex];
+    if (correctOption) {
+      return `提示 3/${MAX_HINT_LEVEL}：正确选项的原文是「${correctOption.slice(0, 1)}…」（共 ${correctOption.length} 字）。`;
+    }
+  }
+  const prefixLength = Math.max(1, Math.ceil(answer.length / 2));
+  return `提示 3/${MAX_HINT_LEVEL}：答案以「${answer.slice(0, prefixLength)}」开头。`;
 }

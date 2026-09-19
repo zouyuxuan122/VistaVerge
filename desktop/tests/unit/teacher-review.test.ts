@@ -38,6 +38,7 @@ function grading(verdict: Grading['verdict'] = 'incorrect'): Grading {
     questionId: 'q1',
     answer: '线粒体',
     expected: '叶绿体',
+    cause: verdict === 'incorrect' ? 'concept' : 'none',
   };
 }
 
