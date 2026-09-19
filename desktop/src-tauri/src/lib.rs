@@ -241,17 +241,258 @@ async fn import_model_file(
     .map_err(|e| format!("import_model_file join error: {e}"))?
 }
 
+/* ------------------------------------------------------------------ */
+/* 按路径整目录导入（设置页第二条通道；也是可自动化的验证入口）          */
+/* ------------------------------------------------------------------ */
+
+#[derive(serde::Serialize)]
+struct ImportedModelSummary {
+    /// 模型入口（*.model3.json）相对 imported 根的路径；找不到时为 None。
+    model_path: Option<String>,
+    /// Cubism Core（live2dcubismcore*.js）相对路径；用户没一起提供时为 None。
+    core_path: Option<String>,
+    file_count: u64,
+    total_bytes: u64,
+    /// 因路径不安全被跳过的文件（最多列 3 个），供前端提示。
+    skipped: Vec<String>,
+}
+
+/// 整目录导入的上限（与前端预检一致；真正拦截在这里）。
+const IMPORT_MAX_TOTAL_BYTES: u64 = 256 * 1024 * 1024;
+const IMPORT_MAX_FILES: usize = 800;
+const IMPORT_MAX_WALK_DEPTH: usize = 8;
+
+/// 递归收集一个模型目录下全部安全文件（相对路径 + 大小），不做任何写入。
+///
+/// 排序保证结果确定；不安全相对路径不中断导入，记入 skipped 由前端提示。
+fn collect_import_files(source: &std::path::Path) -> Result<(Vec<(String, u64)>, Vec<String>), String> {
+    let mut files: Vec<(String, u64)> = Vec::new();
+    let mut skipped: Vec<String> = Vec::new();
+    let mut stack = vec![(source.to_path_buf(), 0usize)];
+    while let Some((dir, depth)) = stack.pop() {
+        if depth > IMPORT_MAX_WALK_DEPTH {
+            return Err("模型目录嵌套过深（>8 层），拒绝导入".to_string());
+        }
+        let entries = std::fs::read_dir(&dir).map_err(|e| format!("读取目录失败 {}: {e}", dir.display()))?;
+        for entry in entries {
+            let entry = entry.map_err(|e| e.to_string())?;
+            let path = entry.path();
+            let file_type = entry.file_type().map_err(|e| e.to_string())?;
+            if file_type.is_dir() {
+                stack.push((path, depth + 1));
+                continue;
+            }
+            if !file_type.is_file() {
+                continue; // 符号链接等一律跳过，不追出源目录
+            }
+            let rel = match path.strip_prefix(source) {
+                Ok(p) => p
+                    .components()
+                    .map(|c| c.as_os_str().to_string_lossy().to_string())
+                    .collect::<Vec<_>>()
+                    .join("/"),
+                Err(_) => continue,
+            };
+            if !is_safe_import_rel_path(&rel) {
+                if skipped.len() < 8 {
+                    skipped.push(rel);
+                }
+                continue;
+            }
+            let size = entry.metadata().map_err(|e| e.to_string())?.len();
+            files.push((rel, size));
+        }
+    }
+    files.sort();
+    Ok((files, skipped))
+}
+
+/// 把用户指定的模型文件夹整目录拷入 app_data_dir/live2d/imported/。
+/// 与分块上传（import_model_file）互为两条通道：这条由前端传**路径**，
+/// Rust 自己遍历拷贝——没有大 payload 过 IPC，也能被 Rust 单测覆盖。
+/// 源目录必须存在；没有 *.model3.json 时报错拒绝（那不是模型文件夹）。
+#[tauri::command]
+async fn import_model_from_dir(
+    app: tauri::AppHandle,
+    source: String,
+) -> Result<ImportedModelSummary, String> {
+    let source_path = std::path::PathBuf::from(&source);
+    if !source_path.is_dir() {
+        return Err(format!("路径不存在或不是文件夹：{source}"));
+    }
+    let source_canon = source_path.canonicalize().map_err(|e| format!("解析路径失败：{e}"))?;
+
+    tauri::async_runtime::spawn_blocking(move || {
+        let (files, skipped) = collect_import_files(&source_canon)?;
+        if files.is_empty() {
+            return Err("所选文件夹里没有可导入的文件".to_string());
+        }
+        let total: u64 = files.iter().map(|(_, s)| s).sum();
+        if total > IMPORT_MAX_TOTAL_BYTES {
+            return Err(format!("总大小 {total} 字节超过上限 {IMPORT_MAX_TOTAL_BYTES}"));
+        }
+        if files.len() > IMPORT_MAX_FILES {
+            return Err(format!("文件数 {} 超过上限 {IMPORT_MAX_FILES}", files.len()));
+        }
+
+        let root = app
+            .path()
+            .app_data_dir()
+            .map_err(|e| format!("app_data_dir: {e}"))?
+            .join("live2d")
+            .join("imported");
+        std::fs::create_dir_all(&root).map_err(|e| e.to_string())?;
+
+        let mut model_path: Option<String> = None;
+        let mut core_path: Option<String> = None;
+        let mut copied_total: u64 = 0;
+        for (rel, size) in &files {
+            let src = source_canon.join(rel.replace('/', "\\"));
+            let dest = root.join(rel);
+            if let Some(parent) = dest.parent() {
+                std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+            }
+            std::fs::copy(&src, &dest).map_err(|e| format!("复制 {rel} 失败：{e}"))?;
+            // 掉电截断防护：拷完每张贴图都 sync。注意必须用**写句柄**——
+            // Windows 上 File::open（只读）调 FlushFileBuffers 会返回拒绝访问 (os error 5)。
+            let done = std::fs::OpenOptions::new()
+                .write(true)
+                .open(&dest)
+                .and_then(|f| f.sync_all());
+            if let Err(e) = done {
+                return Err(format!("落盘确认 {rel} 失败：{e}"));
+            }
+            copied_total += size;
+            let lower = rel.to_ascii_lowercase();
+            if model_path.is_none() && lower.ends_with("model3.json") {
+                model_path = Some(rel.clone());
+            }
+            // Cubism Core 按文件名识别：相对路径可能带子目录（如 lib/live2dcubismcore.min.js），
+            // 用整条路径 starts_with 会漏掉它（真机验证踩过）。
+            let file_name = lower.rsplit('/').next().unwrap_or(&lower).to_string();
+            if core_path.is_none() && file_name.starts_with("live2dcubismcore") && file_name.ends_with(".js") {
+                core_path = Some(rel.clone());
+            }
+        }
+        if copied_total != total {
+            return Err(format!("拷贝字节数不符：{copied_total} / {total}"));
+        }
+        let model_path = model_path.ok_or_else(|| {
+            "所选文件夹里没有 *.model3.json——那才是模型的入口文件（请选择模型文件夹本身，而不是它的上级目录）".to_string()
+        })?;
+
+        Ok(ImportedModelSummary {
+            model_path: Some(model_path),
+            core_path,
+            file_count: files.len() as u64,
+            total_bytes: copied_total,
+            skipped,
+        })
+    })
+    .await
+    .map_err(|e| format!("import_model_from_dir join error: {e}"))?
+}
+
+/* ------------------------------------------------------------------ */
+/* 模型文件服务：vvmodel:// 自定义协议                                  */
+/* ------------------------------------------------------------------ */
+
+/// 极简百分号解码（自定义协议里前端会 encodeURI 路径）。
+fn percent_decode(input: &str) -> String {
+    let bytes = input.as_bytes();
+    let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            let hex = |b: u8| -> Option<u8> {
+                match b {
+                    b'0'..=b'9' => Some(b - b'0'),
+                    b'a'..=b'f' => Some(b - b'a' + 10),
+                    b'A'..=b'F' => Some(b - b'A' + 10),
+                    _ => None,
+                }
+            };
+            if let (Some(hi), Some(lo)) = (hex(bytes[i + 1]), hex(bytes[i + 2])) {
+                out.push(hi * 16 + lo);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).to_string()
+}
+
+fn content_type_for(rel: &str) -> &'static str {
+    let lower = rel.to_ascii_lowercase();
+    if lower.ends_with(".json") {
+        "application/json"
+    } else if lower.ends_with(".png") {
+        "image/png"
+    } else if lower.ends_with(".jpg") || lower.ends_with(".jpeg") {
+        "image/jpeg"
+    } else if lower.ends_with(".js") {
+        "text/javascript"
+    } else if lower.ends_with(".txt") || lower.ends_with(".md") {
+        "text/plain; charset=utf-8"
+    } else {
+        "application/octet-stream"
+    }
+}
+
+/// 从 app_data_dir/live2d/imported/ 读一个模型文件（含路径校验）。
+///
+/// 为什么不用 asset 协议：`convertFileSrc` 会把整条 Windows 路径编码成**单个** URL 段
+/// （分隔符变 %5C/%2F），而 pixi-live2d-display 用 `new URL(相对路径, 模型URL)` 解析贴图，
+/// 此时 URL 的「目录」只剩 `http://asset.localhost/`，相对路径会被拼成错误位置 → 403。
+/// 自定义协议用真实斜杠，相对解析天然正确（真机验证踩过）。
+fn read_model_asset(app: &tauri::AppHandle, raw_path: &str) -> Result<Vec<u8>, (u16, String)> {
+    let decoded = percent_decode(raw_path);
+    let rel = decoded.trim_start_matches('/');
+    if !is_safe_import_rel_path(rel) {
+        return Err((403, format!("拒绝不安全的模型路径：{rel}")));
+    }
+    let root = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| (500, format!("app_data_dir: {e}")))?
+        .join("live2d")
+        .join("imported");
+    let target = root.join(rel);
+    std::fs::read(&target).map_err(|e| (404, format!("读取失败 {rel}: {e}")))
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_http::init())
+        .register_uri_scheme_protocol("vvmodel", |ctx, request| {
+            let path = request.uri().path().to_string();
+            match read_model_asset(ctx.app_handle(), &path) {
+                Ok(bytes) => tauri::http::Response::builder()
+                    .status(200)
+                    .header("Content-Type", content_type_for(&path))
+                    // 页面源是 tauri.localhost，跨源取模型文件需要放行 CORS
+                    .header("Access-Control-Allow-Origin", "*")
+                    .body(bytes)
+                    .unwrap_or_else(|_| tauri::http::Response::new(Vec::new())),
+                Err((status, message)) => tauri::http::Response::builder()
+                    .status(status)
+                    .header("Access-Control-Allow-Origin", "*")
+                    .header("Content-Type", "text/plain; charset=utf-8")
+                    .body(message.into_bytes())
+                    .unwrap_or_else(|_| tauri::http::Response::new(Vec::new())),
+            }
+        })
         .invoke_handler(tauri::generate_handler![
             set_secret,
             get_secret,
             delete_secret,
             db_read_file,
             db_write_file,
-            import_model_file
+            import_model_file,
+            import_model_from_dir
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
@@ -259,7 +500,7 @@ pub fn run() {
 
 #[cfg(test)]
 mod tests {
-    use super::{is_safe_db_file_name, is_safe_import_rel_path};
+    use super::{collect_import_files, is_safe_db_file_name, is_safe_import_rel_path};
 
     #[test]
     fn accepts_plain_names() {
@@ -325,5 +566,65 @@ mod tests {
         // 空串与超长
         assert!(!is_safe_import_rel_path(""));
         assert!(!is_safe_import_rel_path(&"a".repeat(513)));
+    }
+
+    #[test]
+    fn collect_import_files_walks_recursively_and_is_deterministic() {
+        let tmp = std::env::temp_dir().join(format!("vv-import-test-{}", std::process::id()));
+        let model_dir = tmp.join("fense");
+        std::fs::create_dir_all(&model_dir).unwrap();
+        std::fs::write(model_dir.join("fense.model3.json"), b"{}").unwrap();
+        std::fs::write(model_dir.join("fense.moc3"), vec![0u8; 100]).unwrap();
+        std::fs::create_dir_all(model_dir.join("tex")).unwrap();
+        std::fs::write(model_dir.join("tex").join("texture_00.png"), vec![1u8; 2048]).unwrap();
+        std::fs::write(tmp.join("live2dcubismcore.min.js"), b"core").unwrap();
+
+        let (files, skipped) = collect_import_files(&tmp).unwrap();
+        assert_eq!(skipped, Vec::<String>::new());
+        // 排序确定，且嵌套目录进来了
+        assert_eq!(
+            files,
+            vec![
+                ("fense/fense.moc3".to_string(), 100),
+                ("fense/fense.model3.json".to_string(), 2),
+                ("fense/tex/texture_00.png".to_string(), 2048),
+                ("live2dcubismcore.min.js".to_string(), 4),
+            ]
+        );
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn collect_import_files_skips_unsafe_names_without_aborting() {
+        let tmp = std::env::temp_dir().join(format!("vv-import-skip-{}", std::process::id()));
+        let model_dir = tmp.join("m");
+        std::fs::create_dir_all(&model_dir).unwrap();
+        std::fs::write(model_dir.join("a.model3.json"), b"{}").unwrap();
+        // 保留设备名（CON）用常规 API 创建不了；用 verbatim 路径绕过试试。
+        // 创建成功 → 收集时应被跳过且不中断；创建被拒 → 该文件系统不存在此风险，
+        // 退而确认安全文件被正常收集（跳过逻辑已由 is_safe_import_rel_path 单测覆盖）。
+        let verbatim = format!("\\\\?\\{}", model_dir.join("CON").display());
+        if std::fs::write(&verbatim, b"x").is_ok() {
+            let (files, skipped) = collect_import_files(&tmp).unwrap();
+            assert_eq!(files.len(), 1);
+            assert!(skipped.iter().any(|s| s == "m/CON"), "skipped={skipped:?}");
+        } else {
+            let (files, skipped) = collect_import_files(&tmp).unwrap();
+            assert_eq!(files.len(), 1);
+            assert!(skipped.is_empty());
+        }
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn collect_import_files_reports_missing_model_entry_upstream() {
+        // 没有任何 model3.json 的目录：收集不为空，但由 import_model_from_dir 报错拒绝
+        let tmp = std::env::temp_dir().join(format!("vv-import-nomodel-{}", std::process::id()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        std::fs::write(tmp.join("readme.txt"), b"not a model").unwrap();
+        let (files, _) = collect_import_files(&tmp).unwrap();
+        assert_eq!(files.len(), 1);
+        assert!(files.iter().all(|(rel, _)| !rel.ends_with("model3.json")));
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 }

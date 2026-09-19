@@ -283,3 +283,40 @@ function pickDirectory(): Promise<DirInput | null> {
     input.click();
   });
 }
+
+/* ------------------------------------------------------------------ */
+/* 通道二：按路径整目录导入                                            */
+/* ------------------------------------------------------------------ */
+
+interface ImportedModelSummary {
+  model_path: string | null;
+  core_path: string | null;
+  file_count: number;
+  total_bytes: number;
+  skipped: string[];
+}
+
+/**
+ * 直接按文件夹路径导入（Rust 端遍历拷贝，无大 payload 过 IPC）。
+ *
+ * 与文件夹选择器互为两条通道：这条可在设置页粘贴路径，也是自动化验证的入口。
+ * 成功后同样写入清单并在调用方切换到 Live2D。
+ */
+export async function importModelFromPath(source: string): Promise<ImportResult> {
+  if (!isTauriAvailable()) {
+    throw new Error('模型导入需要在桌面应用中使用（浏览器开发模式没有本机文件通道）');
+  }
+  const trimmed = source.trim().replace(/^["']|["']$/g, '');
+  if (trimmed.length === 0) throw new Error('请先粘贴模型文件夹路径');
+  const { invoke } = await import('@tauri-apps/api/core');
+  const summary = (await invoke('import_model_from_dir', { source: trimmed })) as ImportedModelSummary;
+  if (!summary.model_path) throw new Error('导入失败：没有找到 *.model3.json');
+  const result: ImportResult = {
+    modelPath: summary.model_path,
+    corePath: summary.core_path,
+    fileCount: summary.file_count,
+    totalBytes: summary.total_bytes,
+  };
+  saveImportedManifest(result);
+  return result;
+}

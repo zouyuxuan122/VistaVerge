@@ -14,7 +14,8 @@
 | `npm run build:vite` | rc=0 |
 | `cargo check` / `cargo test --lib` | rc=0 / 3 passed |
 | GUI 走查（Playwright 真浏览器） | **77/77 PASS**，console 零错误 |
-| 生产包冒烟（安装包内嵌前端） | **11/11 PASS**，console 零错误 |
+| 生产包冒烟（安装包内嵌前端） | **17/17 PASS**，console 零错误 |
+| **桌面端到端（真实 Tauri 窗口 + CDP）** | **13/13 PASS**：导入模型 → 自动切 Live2D → 渲染 |
 
 修复的缺陷总数：**22 项**（含 2 项 P0）。P0 分别是：
 1. 文本对话从未携带 API Key（真实供应商下全部 401）；
@@ -87,3 +88,26 @@
 | C2 | P1 | 截图 `base-01..04` | 学习/插件页签为裸控件；统计页正常 | 同 B2 |
 | C3 | P1 | 截图 `base-02-workspace` | 工作区大面积灰色空白 | 同 B3 |
 | C4 | P2 | 截图 `base-01-chat` | 笔记本 CC-BY 署名压在人物身上，可读性差 | ✅ 已修：署名加纸底与描边 |
+
+
+---
+
+## D. 真实桌面窗口验证（AUDIT-01 续）
+
+用户要求「依赖真实桌面窗口那就加上呗」后，启动打包好的 EXE，用 CDP（DevTools 协议）
+驱动应用自己的 WebView 走完整链路（不注入宿主鼠标/键盘）。结果 13/13 PASS，
+并暴露出 **4 个只在打包版存在、dev 服务器永远测不到**的缺陷（dev 不注入 CSP）：
+
+| # | 级别 | 现象 | 根因 | 修法 |
+| --- | --- | --- | --- | --- |
+| D1 | P0 | Live2D 在安装版永远起不来，报「Current environment does not allow unsafe-eval」 | pixi v7 `ShaderSystem.systemCheck()` 在无 `'unsafe-eval'` 的 CSP 下直接抛错 | 内联 `@pixi/unsafe-eval@7.2.4` 等价补丁（`ui/pixiUnsafeEvalPatch.ts`）。**不能装该包**：它与 live2d-display 拉的 `@pixi/*@6.5.10` peer 冲突，装下去会重排依赖树并弄崩类型 |
+| D2 | P1 | 3D 笔记本贴图静默丢失（画布在、模型在，就是没贴图） | three 新版用 `fetch` 加载贴图，`connect-src` 缺 `blob:` | CSP `connect-src` 增加 `blob: data:` |
+| D3 | P1 | 导入模型后贴图 403，模型加载失败 | `convertFileSrc` 把整条 Windows 路径编码成**单个** URL 段，pixi 用 `new URL(相对路径, 模型URL)` 解析贴图时目录算错，请求落到 scope 外 | 改用自定义协议 `vvmodel://`（真实斜杠，相对解析天然正确；Rust 侧自带路径校验与 CORS 头），弃用 assetProtocol |
+| D4 | P1 | 导入必失败：`落盘确认 xxx 失败：拒绝访问 (os error 5)` | Windows 上 `File::open`（只读句柄）调 `sync_all` 即返回 ACCESS_DENIED | 落盘确认改用写句柄 `OpenOptions::new().write(true)` |
+
+另外两个只有真实窗口才暴露的时序/状态问题：
+- 模型加载成功后未清除初始提示（`loadError` 初值非空）→ canvas 的 `v-if` 永不成立（已修）；
+- canvas 用 `v-if` 在异步流程里换 DOM 会踩 Vue 补丁期 `insertBefore null`（已改为 canvas 常驻 + 提示覆盖层）。
+
+**结论**：dev 服务器走查 + 生产包冒烟都不足以代表「打包版可用」；涉及 CSP、协议、
+Windows 句柄语义的改动必须在真实窗口里复验一次。已把这条写进 HANDOFF 的踩坑清单。

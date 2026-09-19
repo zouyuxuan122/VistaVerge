@@ -29,19 +29,21 @@ interface ResolvedSources {
   coreUrl: string | null;
 }
 
-/** 解析模型与 Cubism Core 的加载地址（内置 → 静态路径；导入 → asset 协议）。 */
+/** 解析模型与 Cubism Core 的加载地址（内置 → 静态路径；导入 → vvmodel 自定义协议）。 */
 async function resolveSources(): Promise<ResolvedSources | null> {
   if (LIVE2D_MODEL_BUNDLED) {
     return { modelUrl: BUNDLED_MODEL_URL, coreUrl: BUNDLED_CORE_URL };
   }
   const manifest: ImportResult | null = loadImportedManifest();
   if (!manifest || !isTauriAvailable()) return null;
-  const { appDataDir } = await import('@tauri-apps/api/path');
-  const { convertFileSrc } = await import('@tauri-apps/api/core');
-  const root = await appDataDir();
-  const base = root.replace(/[/\\]+$/, '');
+  // vvmodel 协议用真实斜杠提供 app_data/live2d/imported/ 下的文件：
+  // pixi 解析贴图时用 new URL(相对路径, 模型URL)，只有路径带真实分隔符才拼得对。
   const toUrl = (rel: string): string =>
-    convertFileSrc(`${base}/live2d/imported/${rel.replace(/\\/g, '/')}`);
+    `http://vvmodel.localhost/${rel
+      .replace(/\\/g, '/')
+      .split('/')
+      .map(encodeURIComponent)
+      .join('/')}`;
   return {
     modelUrl: toUrl(manifest.modelPath),
     coreUrl: manifest.corePath ? toUrl(manifest.corePath) : null,
@@ -88,6 +90,19 @@ function loadCubismCore(coreUrl: string): Promise<void> {
     document.head.appendChild(script);
   });
   return corePromise;
+}
+
+let evalPatchInstalled = false;
+/**
+ * 打包版 CSP 不含 'unsafe-eval'，pixi 的 ShaderSystem.systemCheck() 会直接抛
+ * 「Current environment does not allow unsafe-eval」（dev 无 CSP 所以从没暴露）。
+ * 用内联的 @pixi/unsafe-eval 等价补丁替换依赖 eval 的着色器同步路径。
+ */
+async function installUnsafeEvalPatch(): Promise<void> {
+  if (evalPatchInstalled) return;
+  const { installPixiUnsafeEvalPatch } = await import('./pixiUnsafeEvalPatch');
+  installPixiUnsafeEvalPatch();
+  evalPatchInstalled = true;
 }
 
 function fitModel() {
@@ -145,6 +160,11 @@ onMounted(async () => {
       return;
     }
     await loadCubismCore(sources.coreUrl);
+    await installUnsafeEvalPatch();
+    // 模型来源确认可用：摘掉提示浮层。
+    // canvas 常驻 DOM（不再用 v-if 切换）——v-if 在异步流程里换 DOM 会踩 Vue
+    // 补丁期的 insertBefore null（真机验证遇到的），常驻 + 覆盖层更稳。
+    loadError.value = '';
     if (!canvasEl.value || !hostEl.value || disposed) return;
     app = new PIXI.Application({
       view: canvasEl.value,
@@ -246,10 +266,12 @@ onBeforeUnmount(() => {
 
 <template>
   <section ref="hostEl" class="scene-pane avatar-pane" aria-label="数字伙伴（Live2D）">
-    <canvas v-if="!loadError" ref="canvasEl" class="avatar-canvas" />
-    <div v-else class="avatar-fallback">
+    <!-- canvas 常驻（透明底，模型未就绪时是空的），提示以覆盖层出现 -->
+    <canvas ref="canvasEl" class="avatar-canvas" />
+    <div v-if="loadError" class="avatar-fallback">
       Live2D 模型不可用：{{ loadError }}<br />
-      <small>把 fense 模型放入 desktop/public/live2d/ 后重启</small>
+      <small v-if="LIVE2D_MODEL_BUNDLED">把 fense 模型放入 desktop/public/live2d/ 后重启</small>
+      <small v-else>可在 设置 → 数字人形象 里导入模型文件夹</small>
     </div>
     <span class="scene-tag">Live2D · 阿芙洛狄忒（用户自备）· 口型为音频近似</span>
   </section>

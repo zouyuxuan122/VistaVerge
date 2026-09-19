@@ -23,11 +23,7 @@
       }
     ],
     "security": {
-      "csp": "default-src 'self' tauri: ipc: http://ipc.localhost; connect-src 'self' https: wss: http://localhost:* ws://localhost:* ipc: http://ipc.localhost asset: http://asset.localhost; img-src 'self' data: blob: asset: http://asset.localhost; media-src 'self' data: blob: asset: http://asset.localhost; style-src 'self' 'unsafe-inline'; script-src 'self' 'wasm-unsafe-eval' asset: http://asset.localhost; worker-src 'self' blob:; child-src 'self' blob:",
-      "assetProtocol": {
-        "enable": true,
-        "scope": ["$APPDATA/live2d/**"]
-      }
+      "csp": "default-src 'self' tauri: ipc: http://ipc.localhost; connect-src 'self' https: wss: blob: data: http://localhost:* ws://localhost:* ipc: http://ipc.localhost http://vvmodel.localhost; img-src 'self' data: blob: http://vvmodel.localhost; media-src 'self' data: blob:; style-src 'self' 'unsafe-inline'; script-src 'self' 'wasm-unsafe-eval' http://vvmodel.localhost; worker-src 'self' blob:; child-src 'self' blob:"
     }
   },
   "bundle": {

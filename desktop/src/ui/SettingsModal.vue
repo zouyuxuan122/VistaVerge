@@ -11,6 +11,7 @@ import { avatarOptionLabel, AVATAR_MODES, LIVE2D_MODEL_BUNDLED, type AvatarMode 
 import { getSecret } from '../platform/credentials';
 import {
   importLive2dModel,
+  importModelFromPath,
   loadImportedManifest,
   isTauriAvailable,
   type ImportResult,
@@ -41,6 +42,7 @@ const importing = ref(false);
 const importProgress = ref('');
 const importResult = ref<ImportResult | null>(loadImportedManifest());
 const importError = ref('');
+const importPath = ref('');
 
 async function runImport() {
   if (importing.value) return;
@@ -57,18 +59,38 @@ async function runImport() {
       importProgress.value = '';
       return;
     }
-    importResult.value = result;
-    importProgress.value = result.corePath
-      ? `导入完成：${result.fileCount} 个文件。已切换到 Live2D。`
-      : `导入完成：${result.fileCount} 个文件，但缺少 Cubism Core（live2dcubismcore.min.js），需要补上才能显示。`;
-    // 导入成功即切换（默认视频人，导入模型后才用 Live2D）
-    if (result.corePath) setAvatarMode('live2d');
+    applyImportResult(result, `导入完成：${result.fileCount} 个文件。`);
   } catch (err) {
     importError.value = err instanceof Error ? err.message : String(err);
     importProgress.value = '';
   } finally {
     importing.value = false;
   }
+}
+
+async function runPathImport() {
+  if (importing.value) return;
+  importing.value = true;
+  importError.value = '';
+  importProgress.value = '正在拷贝模型文件夹…';
+  try {
+    const result = await importModelFromPath(importPath.value);
+    applyImportResult(result, `导入完成：${result.fileCount} 个文件（${Math.round(result.totalBytes / 1024 / 1024)} MB）。`);
+  } catch (err) {
+    importError.value = err instanceof Error ? err.message : String(err);
+    importProgress.value = '';
+  } finally {
+    importing.value = false;
+  }
+}
+
+function applyImportResult(result: ImportResult, prefix: string) {
+  importResult.value = result;
+  importProgress.value = result.corePath
+    ? `${prefix}已切换到 Live2D。`
+    : `${prefix}但缺少 Cubism Core（live2dcubismcore.min.js），需要补上才能显示。`;
+  // 导入成功即切换（默认视频人，导入模型后才用 Live2D）
+  if (result.corePath) setAvatarMode('live2d');
 }
 
 const haForm = reactive({ url: '', token: '' });
@@ -182,7 +204,19 @@ function close() {
               已导入：{{ importResult.modelPath }}<template v-if="importResult.corePath"> · 含 Cubism Core</template>
             </span>
           </div>
-          <p v-if="importProgress" class="field-note">{{ importProgress }}</p>
+          <div v-if="importSupported" style="display:flex;gap:10px;margin-top:8px">
+            <input
+              v-model="importPath"
+              data-testid="import-path"
+              style="flex:1"
+              placeholder="或直接粘贴模型文件夹路径，例如 D:\models\fense"
+              @keydown.enter.prevent="runPathImport"
+            />
+            <button class="btn" type="button" data-testid="import-path-btn" :disabled="importing || importPath.trim().length === 0" @click="runPathImport">
+              按路径导入
+            </button>
+          </div>
+          <p v-if="importProgress" class="field-note" data-testid="import-progress">{{ importProgress }}</p>
           <p v-if="importError" class="field-note" style="color:var(--err)">{{ importError }}</p>
           <p v-if="!importSupported" class="field-note">模型导入需要在桌面应用中使用（浏览器开发模式没有本机文件通道）。</p>
           <p class="field-note">
