@@ -463,10 +463,26 @@ fn read_model_asset(app: &tauri::AppHandle, raw_path: &str) -> Result<Vec<u8>, (
     std::fs::read(&target).map_err(|e| (404, format!("读取失败 {rel}: {e}")))
 }
 
+/* ------------------------------------------------------------------ */
+/* 应用内更新：重启命令                                                 */
+/* ------------------------------------------------------------------ */
+
+/// 安装更新后重启应用（updater JS 插件的 `install()` 只落盘，不重启）。
+///
+/// 为什么自己写而不是引入 tauri-plugin-process：本任务文件域只允许新增
+/// `@tauri-apps/plugin-updater` 一个 JS 依赖，避免再多一个前端包；
+/// 原生重启走这里即可（`AppHandle::restart` 会重新拉起当前进程）。
+#[tauri::command]
+fn restart_app(app: tauri::AppHandle) {
+    app.restart();
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_http::init())
+        // updater 插件：pubkey / endpoints / windows.installMode 都在 tauri.conf.json 的 plugins.updater。
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .register_uri_scheme_protocol("vvmodel", |ctx, request| {
             let path = request.uri().path().to_string();
             match read_model_asset(ctx.app_handle(), &path) {
@@ -492,7 +508,8 @@ pub fn run() {
             db_read_file,
             db_write_file,
             import_model_file,
-            import_model_from_dir
+            import_model_from_dir,
+            restart_app
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

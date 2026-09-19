@@ -3,5 +3,8 @@
   "build": {
     "frontendDist": "../dist-beta",
     "beforeBuildCommand": "npm run noop"
+  },
+  "bundle": {
+    "createUpdaterArtifacts": true
   }
 }

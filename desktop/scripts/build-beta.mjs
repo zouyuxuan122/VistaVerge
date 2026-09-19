@@ -1,5 +1,5 @@
 /**
- * build-beta.mjs — 产出**可合法分发**的 beta 产物。
+ * build-beta.mjs — 产出**可合法分发**且**带 updater 签名**的 beta 产物。
  *
  * 为什么需要这个脚本：`desktop/public/live2d/`（Live2D 模型「阿芙洛狄忒」+ Cubism Core）
  * 的授权是「免费使用，严禁二次修改、销售或出租」，本项目把它当用户自备素材处理——
@@ -13,12 +13,19 @@
  *    （rmSync 报成功但目录还在），Vite 的 emptyOutDir 清不干净，
  *    上一轮的 live2d 会留在产物里被一起打包。所以每次构建前把旧产物重命名让开。
  *
+ * updater 签名（本任务新增）：
+ * - 私钥与密码放在 `src-tauri/keys/`（已在 .gitignore，**绝不入库、绝不进日志**）。
+ * - 通过环境变量 `TAURI_SIGNING_PRIVATE_KEY_PATH` / `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`
+ *   传给 tauri build，产出 `*-setup.exe.sig`。
+ * - 构建后调用 `scripts/make-latest-json.mjs` 生成 `latest.json`（Tauri CLI 不生成它）。
+ *
  * 用法：npm run build:beta
- * 产物：desktop/src-tauri/target/release/bundle/nsis/VistaVerge_<version>_x64-setup.exe
+ * 产物：desktop/src-tauri/target/release/bundle/nsis/
+ *   VistaVerge_<version>_x64-setup.exe (+ .sig) 与 latest.json
  */
 
 import { spawnSync } from 'node:child_process';
-import { existsSync, readdirSync, renameSync, statSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync, renameSync, statSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 
 const desktopRoot = fileURLToPath(new URL('..', import.meta.url));
@@ -26,12 +33,16 @@ const publicLive2D = fileURLToPath(new URL('../public/live2d', import.meta.url))
 // 暂存区在 public/ 之外：放进 public/ 会被 Vite 原样复制进产物。
 const heldLive2D = fileURLToPath(new URL('../.live2d-hold', import.meta.url));
 const outDir = fileURLToPath(new URL('../dist-beta', import.meta.url));
+// updater 私钥与密码（.gitignore 已排除整个 keys/ 目录）。
+const privateKeyPath = fileURLToPath(new URL('../src-tauri/keys/updater.key', import.meta.url));
+const passwordPath = fileURLToPath(new URL('../src-tauri/keys/password.txt', import.meta.url));
 
-function run(command, args) {
+function run(command, args, env = {}) {
   const result = spawnSync(command, args, {
     cwd: desktopRoot,
     stdio: 'inherit',
     shell: process.platform === 'win32',
+    env: { ...process.env, ...env },
   });
   if (result.status !== 0) {
     throw new Error(`命令失败（exit ${result.status}）：${command} ${args.join(' ')}`);
@@ -69,6 +80,30 @@ function assertNoLive2D(distDir) {
   console.log(`[beta] 已确认产物不含 Live2D 资产（共检查 ${files.length} 个文件）`);
 }
 
+/**
+ * 组装 updater 签名环境变量。私钥内容与密码都不打印，只传路径/值给子进程。
+ * 密码优先取环境变量，其次读 keys/password.txt。
+ */
+function signingEnv() {
+  if (!existsSync(privateKeyPath)) {
+    throw new Error(
+      `缺少 updater 私钥：${privateKeyPath}\n` +
+        '  → 见 src-tauri/keys/README.md 生成（该目录已被 .gitignore 排除，绝不入库）',
+    );
+  }
+  const password =
+    process.env.TAURI_SIGNING_PRIVATE_KEY_PASSWORD ??
+    (existsSync(passwordPath) ? readFileSync(passwordPath, 'utf8').trim() : '');
+  // _PATH 与内容变量都给：部分 CLI 版本只认其中一个（实测 2.9 认内容变量）。
+  // 密钥内容只进子进程环境，不打印、不写日志。
+  const env = {
+    TAURI_SIGNING_PRIVATE_KEY_PATH: privateKeyPath,
+    TAURI_SIGNING_PRIVATE_KEY: readFileSync(privateKeyPath, 'utf8').trim(),
+  };
+  if (password) env.TAURI_SIGNING_PRIVATE_KEY_PASSWORD = password;
+  return env;
+}
+
 let moved = false;
 try {
   if (existsSync(heldLive2D)) {
@@ -100,6 +135,10 @@ try {
   }
 }
 
-console.log('[beta] 打包 Tauri 安装包 …');
-run('npx', ['tauri', 'build', '--config', 'src-tauri/tauri.beta.conf.json']);
-console.log('[beta] 完成。安装包在 src-tauri/target/release/bundle/nsis/');
+console.log('[beta] 打包 Tauri 安装包（带 updater 签名）…');
+run('npx', ['tauri', 'build', '--config', 'src-tauri/tauri.beta.conf.json'], signingEnv());
+
+console.log('[beta] 生成 updater 清单 latest.json …');
+run('node', ['scripts/make-latest-json.mjs']);
+
+console.log('[beta] 完成。安装包 / 签名 / latest.json 在 src-tauri/target/release/bundle/nsis/');

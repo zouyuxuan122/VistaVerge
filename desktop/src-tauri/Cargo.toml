@@ -1,6 +1,6 @@
 [package]
 name = "vistaverge"
-version = "0.1.0-beta.1"
+version = "0.1.0-beta.2"
 description = "VistaVerge 桌面版（Tauri）"
 authors = ["you"]
 edition = "2021"
@@ -15,7 +15,11 @@ tauri-build = { version = "2", features = [] }
 [dependencies]
 tauri = { version = "2", features = [] }
 tauri-plugin-http = "2"
+# 应用内自动更新：签名校验（minisign）+ 下载 + 安装；公钥/端点见 tauri.conf.json plugins.updater。
+tauri-plugin-updater = "2"
 serde = { version = "1", features = ["derive"] }
+# generate_context! 在存在插件配置（plugins.updater）时会引用 serde_json 解析配置。
+serde_json = "1"
 # OS 凭据仓（keyring v3 按平台特性开关）；本机 Windows 用 windows-native，
 # apple-native 供未来 macOS 构建复用（cfg 门控，不引入额外编译负担）。
 keyring = { version = "3", default-features = false, features = ["windows-native", "apple-native"] }

@@ -64,3 +64,6 @@
 # Live2D 用户自备模型（不入库、不随发行版分发）
 /desktop/public/live2d/
 
+# updater 签名私钥（绝不入库；公钥已写进 tauri.conf.json 的 plugins.updater.pubkey）
+/desktop/src-tauri/keys/
+
