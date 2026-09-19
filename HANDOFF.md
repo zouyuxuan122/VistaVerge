@@ -1,10 +1,47 @@
 # VistaVerge 交接文档
 
-更新时间：2026-09-19（AUDIT-01 收口版）。给下一个模型/新会话：读完本文件 + `AGENTS.md` 即可继续开发，不需要回看聊天记录。
+更新时间：2026-09-19（FEATURE-01 收口版）。给下一个模型/新会话：读完本文件 + `AGENTS.md` 即可继续开发，不需要回看聊天记录。
 
 ---
 
-## 0. AUDIT-01 之后的现状（最新，先看这段）
+## 0. FEATURE-01 之后的现状（最新，先看这段）
+
+`0.1.0-beta.2` 已发布（承 beta.1 的安装与验证体系）。本轮以「规划.txt 全功能差距审计 → 控制包 FEATURE-01」收口，
+控制包与证据在 `工程控制/FEATURE-01/`（GAP_AUDIT 登记 6 域 40+ 差距与 40+ bug）。新增能力：
+
+- **教师 PPT 讲课**：`teacher/pptx.ts`（fflate 解 OOXML，页序走 rels）+ `teacher/lecture.ts`（讲课状态机）+
+  `ui/teacher/LectureView.vue`（渲染/批注/放大镜 2-4x/激光笔/缩略图/讲稿字幕）+ `app/lectureSpeech.ts`
+  （分句 TTS 旁白 + RMS 口型，未配 TTS 字幕兜底）；教师闭环补全（诊断/提示/错因/变式/复盘/复习入口/落库）。
+- **陪伴**：`companion/`（charcard v1v2v3+PNG、styleProfile 口癖、knowledge 知识库、proactive 仲裁）；
+  store 工具调用循环（memory.search 等只读工具，上限 3 轮）；记忆/知识库/人设/口癖注入系统提示；
+  语音回应门控（全回应/智能/仅唤醒，record 进 7 天旁听记忆）；戳一戳（Live2D/Video 热区+气泡）；
+  主动插话仲裁（额度 2/h、安静时段、不抢话）；UI 打断按钮；编辑消息=截断重新生成；回退到此处（两段确认）。
+- **感知/MC**：16℃ 一小时、照度、HA 控制授权门（默认关+每次确认）、静默开关真接线；
+  MC 怪物攻击+PvP 反击（默认关）、二次搭建谎报等 sim 修复；插件落盘（vistaverge-plugins.json）与新增权限阻断。
+- **助手**：`assistant/`（ghPatrol 只读巡检 ETag+限流退避+零写；socialDraft 草稿+发送恒确认+通道未就绪）；
+  入口在 插件→助手 子页签；巡检/MC 事件经 `setAssistantEventListener`/`setMcEventListener` → `tryProactiveSpeak` 开口。
+- **更新与安装**：tauri-plugin-updater（pubkey 在 tauri.conf.json，私钥 `src-tauri/keys/` 已 gitignore）；
+  设置→更新 页（UpdatePanel 检查/下载/验签/安装，未配置更新源如实显示）；NSIS 定制中文安装页
+  （`src-tauri/installer/` 位图+hooks）；`scripts/make-latest-json.mjs` 生成更新清单；build:beta 出包即签名。
+- **前端打磨**：站酷快乐体（OFL，本地 `public/fonts/`）；显示器化屏幕+左上「二次元/正常」「对话/映射」双拨杆；
+  顶栏中段时钟；人物区状态浮签与桌面小物；统计页手绘化；镜像只读扫描线；动效补全（弹层/crossfade/stagger）；
+  reduce-motion、页签 roving tabindex、aria-live、窄窗折叠。
+
+**门（全部本地复跑过）**：typecheck rc=0；单测 **614 passed**；合同 36 passed；build:vite rc=0；
+cargo check rc=0 / cargo test **8 passed**；GUI 新能力走查 **32/32 PASS**；讲课端到端 **10/10 PASS**（真实 .pptx）。
+
+**新坑（本轮踩到，务必记住）**：
+- `.stage` 是全宽透明层，会吃掉人物区点击——已改 `pointer-events:none` + `.screen-pane` 恢复 auto；
+  以后往人物区加交互元素，先确认这条穿透链没被破坏。
+- Windows 上 dev server/preview 会持有 `public/` 句柄导致 `build:beta` 的「移出 live2d」EPERM：
+  **出包前必须杀掉全部 vite dev/preview 进程**（5173/5174/4173…）。
+- `generate_context!` 在启用 `plugins.updater` 时需要 `serde_json` 直接依赖（Cargo.toml 已加）。
+- Tauri CLI **不生成 latest.json**——用 `desktop/scripts/make-latest-json.mjs`；发布资产 = setup.exe + .sig + latest.json。
+- updater 私钥 `src-tauri/keys/`（gitignore 已排除）；换机器要重新生成并同步 tauri.conf.json 的 pubkey，**旧包将无法校验新包签名**（需用户重装一次）。
+
+（以下为 AUDIT-01 记录，除标注「已更新」外仍有效。）
+
+## 0.1 AUDIT-01 之后的现状（beta.1）
 
 `0.1.0-beta.1` 测试版已产出可分发安装包并上传 GitHub（含 Issues 入口）。本轮做了三件事：
 
@@ -75,10 +112,11 @@ Tauri2 + Vue3 主界面（以最初前端 s2s/demo 为基座重构）、Live2D �
 
 ## 3. 仓库与 Git 状态
 
-- 远程：`https://github.com/zouyuxuan122/VistaVerge`（私有）。
+- 远程：`https://github.com/zouyuxuan122/VistaVerge`（**公开**，2026-09-19 用户明确指示转公开；公开前已扫 git 追踪文件无密钥形态内容）。
 - 本地：`D:\丰富履历专用文件夹\cybergirl-cloud`，分支 `main`，已随 AUDIT-01 完成首次提交与推送（用户本轮明确授权上传源码与产物）。
-- 发行：`v0.1.0-beta.1` 预发布，资产为 `VistaVerge_0.1.0-beta.1_x64-setup.exe`（6.80 MB，
-  sha256 `c57b30f9`，含模型导入 + 真实窗口验证）。**该产物已剔除 Live2D 模型**（授权禁分发）。
+- 发行：`v0.1.0-beta.2` 预发布（FEATURE-01），资产为 `VistaVerge_0.1.0-beta.2_x64-setup.exe` + `.sig` + `latest.json`
+  （应用内自动更新自本版起可用；**产物已剔除 Live2D 模型**）。
+  上一版 `v0.1.0-beta.1`（6.80 MB，sha256 `c57b30f9`）。
 - 授权边界：Git 写操作仍需用户明确授权；本轮授权不自动延伸到后续公开发布或推送其他敏感工作区。
 - `.gitignore` 已排除：依赖、`target/`、`dist/`、密钥、数据库、`deploy-package/`、`s2s/`、`desktop/src/assets/`、`desktop/src-tauri/icons/`、`desktop/public/live2d/`（Live2D 模型与 Cubism Core，授权禁分发）。
 
@@ -99,7 +137,9 @@ Tauri2 + Vue3 主界面（以最初前端 s2s/demo 为基座重构）、Live2D �
 以最初前端（`s2s/demo`，huggingface/speech-to-speech 改版）为基座：
 
 - **人物全 bleed 背景层**（`.avatar-side`，fixed 贴右 50% 宽全高，左缘 mask 淡入背景，装饰层不拦截输入）。
-- **电脑屏幕**（ScreenPane）：左侧面板，`margin-right: 50vw` 覆盖至她身前；**五页签**：对话 / 本机只读镜像 / AI 工作区 / 当前任务 / **统计**（+ 学习/插件模块）。
+- **电脑屏幕**（ScreenPane）：左侧面板，`margin-right: 50vw` 覆盖至她身前；**7 页签**（已更新）：
+  对话 / 本机只读镜像 / AI 工作区 / 感知 / MC 模拟 / 当前任务 / 统计（+ 学习模块；插件模块含 市场/记忆/助手 三子页签）。
+  屏幕左上角有「二次元/正常」主题拨杆与「对话/映射」快捷拨杆（FEATURE-01 新增）。
 - **桌上笔记本 = 真实 3D 模型 + 实体桌子**（`ui/LaptopModel.vue` + `DeskLaptop.vue`）：CC-BY 4.0 "MacBook Pro M3 16-inch"（jackbaeten，W. Laverty 改色；来源/许可/sha256 在 `desktop/public/models/PROVENANCE.md`，UI 右下角有署名标注）。她面向我们、**屏幕朝她**——我们看到盖子背面；屏幕自发光材质随 `sceneState` 变色；**桌子是 3D 场景里的真几何**（程序化木纹 CanvasTexture 台面 + 接触软影 blob），不是 CSS 贴片；漫画主题自动套油墨描边壳（笔记本+桌子），无 WebGL 回退 CSS 版。相机要近平视长焦且拉远到整机带桌前沿完整入画（俯视压扁或切边都会被否）。Draco 解码器在 `public/draco/`。
 - **统计页**（`ui/StatsView.vue` + `data/usage.ts`）：花费卡片（今日/近7天/累计）、30 天 token 曲线（SVG，输入/输出双线）、**GitHub 风 26 周热力图**、最近记录表。数据源是本地 `usage_ledger`（迁移 v2，只存数字不存正文）；LLM 计量在 `store.instrumentProvider` 单一出口记账（对话/重试/语音共用），优先供应商真实 usage（已开 `stream_options.include_usage`），缺失按字符启发式估算并标注；TTS 记字符数；单价在设置→高级填（元/百万 token），未填只显示 token 不显示花费。
 - **主题双档**：默认**手绘漫画风（亮色）**——纸纹+半调网点、油墨框+虚线第二笔+硬投影、对话尾巴、MOCK 黄色爆发贴、马克笔高亮、她身后漫画速度线、台面涂鸦簇、空对话涂鸦引导（全部在 app.css 末尾漫画块，关键类名在案）；写实=纯黑电影感。切换不丢状态。
