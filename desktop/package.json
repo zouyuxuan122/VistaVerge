@@ -30,14 +30,11 @@
     "@pixiv/three-vrm": "3.5.5",
     "@tauri-apps/api": "^2.9.0",
     "@tauri-apps/plugin-http": "^2.5.0",
-    "@types/sql.js": "1.4.11",
     "@types/three": "0.186.0",
     "pinia": "3.0.4",
     "pixi-live2d-display": "0.4.0",
     "pixi.js": "7.2.4",
-    "sql.js": "1.14.2",
     "three": "0.186.0",
-    "vue": "3.5.43",
-    "vue-router": "5.0.7"
+    "vue": "3.5.43"
   }
 }

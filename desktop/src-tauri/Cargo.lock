@@ -4297,7 +4297,6 @@ version = "0.1.0-beta.1"
 dependencies = [
  "keyring",
  "serde",
- "serde_json",
  "tauri",
  "tauri-build",
  "tauri-plugin-http",

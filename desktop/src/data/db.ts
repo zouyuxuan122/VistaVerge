@@ -5,8 +5,9 @@
  * external-content，但 sql.js 1.14.2 全部 wasm 构建均未启用 FTS5
  * （ENABLE_FTS5=0，实测 `no such module: fts5`）。经批准将官方
  * @sqlite.org/sqlite-wasm 3.53.4-build1（SQLite 本体公有领域）vendor 到
- * ./vendor/ 并经其 OO1 API 访问；sql.js 仍在 package.json 中（文件域限制）
- * 但数据层不再使用。详见 ./vendor/PROVENANCE.md。
+ * ./vendor/ 并经其 OO1 API 访问。数据层只用这份 vendor 实现；
+ * sql.js 已随 2026-09-19 的依赖清理从 package.json 移除（不再被任何代码引用）。
+ * 详见 ./vendor/PROVENANCE.md。
  *
  * 双环境装载：
  * - Node（vitest）：动态 import ./vendor/sqlite3-node.mjs（变量 specifier +
