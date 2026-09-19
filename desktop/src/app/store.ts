@@ -29,12 +29,13 @@ import {
   stripPartialDirective,
 } from './expressionProtocol';
 import { avatarAction, avatarExpression, avatarFacing, avatarGaze, avatarMouth } from './avatarBridge';
+import { resolveDefaultAvatarMode, LIVE2D_MODEL_BUNDLED, type AvatarMode } from './avatarDefaults';
 import { maybeHandleOuting, loadHaTokenPresence, connectHa, perception } from '../sensors/perceptionStore';
 import { maybeHandleMcCommand } from '../mc/session';
 import { registerBuiltinTools } from '../plugins/tools';
 
 export type ThemeName = 'realistic' | 'handdrawn';
-export type AvatarMode = 'live2d' | 'video' | 'scene3d';
+export type { AvatarMode } from './avatarDefaults';
 export type NavTarget = 'chat' | 'study' | 'tasks' | 'plugins' | 'settings';
 export type ScreenTab = 'chat' | 'mirror' | 'workspace' | 'perception' | 'mc' | 'tasks' | 'stats';
 
@@ -106,7 +107,9 @@ export const store = reactive({
   ready: false,
   initError: '',
   theme: (safeGet(LS_THEME) as ThemeName) || 'handdrawn', // 默认手绘漫画风（亮色）；写实暗色可切换
-  avatarMode: (safeGet('vistaverge.avatarMode') as AvatarMode) || 'live2d',
+  // 默认形象按「构建产物里有没有 Live2D 模型」裁决：没有就默认视频数字人，
+  // 用户显式选过则永远尊重（见 app/avatarDefaults.ts）。
+  avatarMode: resolveDefaultAvatarMode(LIVE2D_MODEL_BUNDLED, safeGet('vistaverge.avatarMode')),
   avatarGaze: { x: 0, y: 0 },
   nav: 'chat' as NavTarget,
   /** 打开设置前的导航位置（关闭时还原，避免导航与内容不一致）。 */

@@ -145,6 +145,102 @@ async fn db_write_file(app: tauri::AppHandle, name: String, data: Vec<u8>) -> Re
     .map_err(|e| format!("db_write_file join error: {e}"))?
 }
 
+/* ------------------------------------------------------------------ */
+/* Live2D 模型运行时导入                                               */
+/* ------------------------------------------------------------------ */
+
+/// Windows 保留设备名（大小写不敏感）——同样适用于导入的模型文件名。
+const IMPORT_RESERVED: &[&str] = &[
+    "CON", "PRN", "AUX", "NUL", "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8",
+    "COM9", "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
+];
+
+/// 校验前端提交的模型相对路径。
+///
+/// 允许：`fense/fense.model3.json` 这类嵌套相对路径（含非 ASCII 文件名）。
+/// 拒绝：绝对路径、盘符、反斜杠、`..` 段、空段、控制字符、Windows 保留设备名。
+/// 这是**唯一的写入边界**：模型文件最终落在 app_data_dir/live2d/imported/ 下，
+/// 并通过 asset 协议（scope 限定该目录）暴露给前端，路径必须在此处收死。
+fn is_safe_import_rel_path(rel: &str) -> bool {
+    if rel.is_empty() || rel.len() > 512 {
+        return false;
+    }
+    if rel.chars().any(|c| c.is_control()) {
+        return false;
+    }
+    if rel.contains('\\') || rel.starts_with('/') || rel.contains(':') {
+        return false;
+    }
+    let reserved = |stem: &str| IMPORT_RESERVED.iter().any(|r| stem.eq_ignore_ascii_case(r));
+    rel.split('/').all(|segment| {
+        if segment.is_empty() || segment == "." || segment == ".." || segment.ends_with('.') || segment.ends_with(' ')
+        {
+            return false;
+        }
+        let stem = segment.split('.').next().unwrap_or(segment);
+        !reserved(stem)
+    })
+}
+
+/// 单文件大小上限（64MB）：模型最大的是整张贴图，64MB 足够且能挡住异常载荷。
+const IMPORT_MAX_FILE_BYTES: usize = 64 * 1024 * 1024;
+
+/// 导入一个模型文件（大文件由前端分块多次调用，`append=true` 时续写）。
+///
+/// 目标固定为 app_data_dir/live2d/imported/<rel_path>：
+/// 路径无法逃出该目录（校验见 `is_safe_import_rel_path`），写入后 sync_all 防掉电截断。
+#[tauri::command]
+async fn import_model_file(
+    app: tauri::AppHandle,
+    rel_path: String,
+    data: Vec<u8>,
+    append: bool,
+) -> Result<(), String> {
+    if !is_safe_import_rel_path(&rel_path) {
+        return Err(format!("invalid model relative path: {rel_path:?}"));
+    }
+    if data.len() > IMPORT_MAX_FILE_BYTES {
+        return Err(format!(
+            "chunk too large: {} bytes (max {IMPORT_MAX_FILE_BYTES})",
+            data.len()
+        ));
+    }
+    let root = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| format!("app_data_dir: {e}"))?
+        .join("live2d")
+        .join("imported");
+    let target = root.join(&rel_path);
+    // 双保险：拼接后再确认仍落在 root 内（防未来校验改动引入回归）。
+    let canonical_root = root
+        .canonicalize()
+        .unwrap_or(root.clone());
+    if let Some(parent) = target.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    let canonical_target = target.canonicalize().unwrap_or(target.clone());
+    if !canonical_target.starts_with(&canonical_root) {
+        return Err(format!("import path escapes model dir: {rel_path:?}"));
+    }
+
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut file = if append {
+            std::fs::OpenOptions::new()
+                .append(true)
+                .open(&target)
+                .map_err(|e| e.to_string())?
+        } else {
+            std::fs::File::create(&target).map_err(|e| e.to_string())?
+        };
+        file.write_all(&data).map_err(|e| e.to_string())?;
+        file.sync_all().map_err(|e| e.to_string())?;
+        Ok(())
+    })
+    .await
+    .map_err(|e| format!("import_model_file join error: {e}"))?
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -154,7 +250,8 @@ pub fn run() {
             get_secret,
             delete_secret,
             db_read_file,
-            db_write_file
+            db_write_file,
+            import_model_file
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
@@ -162,7 +259,7 @@ pub fn run() {
 
 #[cfg(test)]
 mod tests {
-    use super::is_safe_db_file_name;
+    use super::{is_safe_db_file_name, is_safe_import_rel_path};
 
     #[test]
     fn accepts_plain_names() {
@@ -195,5 +292,38 @@ mod tests {
         // 正常名字不受影响
         assert!(is_safe_db_file_name("console.db"));
         assert!(is_safe_db_file_name("com10.db"));
+    }
+
+    #[test]
+    fn accepts_nested_model_paths() {
+        assert!(is_safe_import_rel_path("fense/fense.model3.json"));
+        assert!(is_safe_import_rel_path("fense/fense.8192/texture_00.png"));
+        assert!(is_safe_import_rel_path("live2dcubismcore.min.js"));
+        assert!(is_safe_import_rel_path("模型/moc3/file.moc3"));
+    }
+
+    #[test]
+    fn rejects_escaping_or_unsafe_model_paths() {
+        // 逃逸与绝对路径
+        assert!(!is_safe_import_rel_path("../escape.moc3"));
+        assert!(!is_safe_import_rel_path("a/../../b.moc3"));
+        assert!(!is_safe_import_rel_path("/abs/model3.json"));
+        assert!(!is_safe_import_rel_path("C:\\model\\x.moc3"));
+        assert!(!is_safe_import_rel_path("C:/model/x.moc3"));
+        assert!(!is_safe_import_rel_path("\\\\server\\share\\x.moc3"));
+        // 反斜杠统一拒绝（前端已归一化为 /）
+        assert!(!is_safe_import_rel_path("a\\b.moc3"));
+        // 空段 / 点段 / 结尾点与空格 / 控制字符
+        assert!(!is_safe_import_rel_path("a//b.moc3"));
+        assert!(!is_safe_import_rel_path("./x.moc3"));
+        assert!(!is_safe_import_rel_path("a/./b.moc3"));
+        assert!(!is_safe_import_rel_path("a/trailing./b"));
+        assert!(!is_safe_import_rel_path("a/x\u{0000}y"));
+        // Windows 保留设备名（含带扩展名形式）
+        assert!(!is_safe_import_rel_path("NUL"));
+        assert!(!is_safe_import_rel_path("a/COM1.moc3"));
+        // 空串与超长
+        assert!(!is_safe_import_rel_path(""));
+        assert!(!is_safe_import_rel_path(&"a".repeat(513)));
     }
 }

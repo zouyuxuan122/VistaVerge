@@ -18,6 +18,12 @@ export default defineConfig({
       ),
     },
   },
+  define: {
+    // 与 vite.config.ts 的 define 保持一致：单测环境按「本地构建（模型内置）」处理，
+    // 这样 store 默认形象仍是 live2d，既有 UI 测试语义不变。
+    // 发行包（无模型）路径由 resolveDefaultAvatarMode 的纯函数单测覆盖。
+    __VV_LIVE2D_BUNDLED__: 'true',
+  },
   test: {
     environment: 'node',
     include: ['tests/**/*.test.ts'],

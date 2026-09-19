@@ -18,9 +18,18 @@
    以及此前完全没有样式的教师/市场/记忆/工作区/提醒浮层的主题样式。
 3. **细节打磨**：工作区任务计划窗、MC 方块图例与响应式地图、切页动效与 hover 手感。
 
-**门（全部本地复跑过）**：typecheck rc=0；单测 **366 passed**；合同 36 passed；build rc=0；
-cargo check rc=0 / cargo test 3 passed；GUI 走查 **77/77 PASS**（console 零错误）；
-生产包冒烟 **11/11 PASS**。
+**默认形象裁决（用户 2026-09-19 指定，见 `src/app/avatarDefaults.ts`）**：发行包没有内置
+Live2D 模型时**默认视频数字人**，用户在设置里导入模型后自动切到 Live2D；用户显式选过则永远尊重。
+导入链路：`<input webkitdirectory>` 逐文件读字节 → 4MB 分块 invoke `import_model_file`
+（Rust 校验相对路径后写入 `$APPDATA/live2d/imported/`）→ asset 协议（scope 限定 `$APPDATA/live2d/**`，
+Cargo 需 `protocol-asset` feature）加载。Cubism Core 同样禁分发，须用户与模型一起提供。
+
+**门（全部本地复跑过）**：typecheck rc=0；单测 **386 passed**；合同 36 passed；build rc=0；
+cargo check rc=0 / cargo test **5 passed**；GUI 走查 **77/77 PASS**（console 零错误，本地构建含模型）；
+生产包冒烟 **17/17 PASS**（发行包无模型，默认视频人 + 设置有导入入口）。
+
+**VideoAvatar 素材陷阱**：`src/assets/*.mp4` 同样不入库，VideoAvatar 已改用 `import.meta.glob`
+惰性解析——素材缺时诚实显示「缺素材」而不是让新 clone 的构建直接失败。
 
 **新坑（本轮踩到，务必记住）**：
 - 本环境**无法递归删除目录**（`rmSync` 报成功但目录仍在），`emptyOutDir` 清不干净 →
@@ -58,7 +67,7 @@ Tauri2 + Vue3 主界面（以最初前端 s2s/demo 为基座重构）、Live2D �
 - 远程：`https://github.com/zouyuxuan122/VistaVerge`（私有）。
 - 本地：`D:\丰富履历专用文件夹\cybergirl-cloud`，分支 `main`，已随 AUDIT-01 完成首次提交与推送（用户本轮明确授权上传源码与产物）。
 - 发行：`v0.1.0-beta.1` 预发布，资产为 `VistaVerge_0.1.0-beta.1_x64-setup.exe`（6.80 MB，
-  sha256 `5f03ccc5…f3f2c549`）。**该产物已剔除 Live2D 模型**（授权禁分发）。
+  sha256 `d4577b4d…0aa7aa1`，含模型导入功能）。**该产物已剔除 Live2D 模型**（授权禁分发）。
 - 授权边界：Git 写操作仍需用户明确授权；本轮授权不自动延伸到后续公开发布或推送其他敏感工作区。
 - `.gitignore` 已排除：依赖、`target/`、`dist/`、密钥、数据库、`deploy-package/`、`s2s/`、`desktop/src/assets/`、`desktop/src-tauri/icons/`、`desktop/public/live2d/`（Live2D 模型与 Cubism Core，授权禁分发）。
 

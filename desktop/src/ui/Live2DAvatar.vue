@@ -1,9 +1,14 @@
 <script setup lang="ts">
-// Live2D 数字人（用户自备模型 fense/阿芙洛狄忒，授权：灵境Sanctuary 免费使用、禁二改/售卖）。
+// Live2D 数字人。模型是用户自备素材（授权禁分发），来源有两档：
+// 1. 内置：本地构建把模型放 desktop/public/live2d/（开发/自用构建）；
+// 2. 导入：安装版用户在设置里选模型文件夹，文件写入 应用数据/live2d/imported/，
+//    经 Tauri asset 协议（scope 限定该目录）加载。
 // 能力：状态联动、模型表情/动作、音频近似口型（非 viseme，已标注）、面向用户。
 import { onBeforeUnmount, onMounted, ref, watch } from 'vue';
 import * as PIXI from 'pixi.js';
 import { store } from '../app/store';
+import { LIVE2D_MODEL_BUNDLED } from '../app/avatarDefaults';
+import { loadImportedManifest, isTauriAvailable, type ImportResult } from '../platform/live2dImport';
 import { registerAvatarController } from '../app/avatarBridge';
 
 // pixi-live2d-display/cubism4 在模块求值时要求 Live2DCubismCore 全局已存在，
@@ -12,20 +17,40 @@ type Live2DModelType = import('pixi-live2d-display/cubism4').Live2DModel;
 
 (window as unknown as { PIXI: typeof PIXI }).PIXI = PIXI;
 
-const MODEL_URL = '/live2d/fense/fense.model3.json';
-const CORE_URL = '/live2d/lib/live2dcubismcore.min.js';
+const BUNDLED_MODEL_URL = '/live2d/fense/fense.model3.json';
+const BUNDLED_CORE_URL = '/live2d/lib/live2dcubismcore.min.js';
 
-/**
- * 发行产物不含 Live2D 模型（授权禁分发，模型由用户自备）。
- * 构建期常量告诉我们这次产物里有没有模型：没有就直接走诚实回退，
- * 不去请求不存在的文件——否则控制台会留下一条 404，看起来像功能坏了。
- */
-const MODEL_BUNDLED = typeof __VV_LIVE2D_BUNDLED__ === 'undefined' ? true : __VV_LIVE2D_BUNDLED__;
-const NOT_BUNDLED_HINT = '本发行版不含 Live2D 模型（授权禁分发）：请自备模型放入 desktop/public/live2d/ 后重新构建';
+/** 发行版（无内置模型）的默认提示：告诉用户两条可行路径，而不是一句报错。 */
+const NOT_BUNDLED_HINT =
+  '本安装包不含 Live2D 模型（授权禁分发）。已默认使用视频数字人；想要 Live2D 可在 设置 → 数字人形象 里导入模型文件夹。';
+
+interface ResolvedSources {
+  modelUrl: string;
+  coreUrl: string | null;
+}
+
+/** 解析模型与 Cubism Core 的加载地址（内置 → 静态路径；导入 → asset 协议）。 */
+async function resolveSources(): Promise<ResolvedSources | null> {
+  if (LIVE2D_MODEL_BUNDLED) {
+    return { modelUrl: BUNDLED_MODEL_URL, coreUrl: BUNDLED_CORE_URL };
+  }
+  const manifest: ImportResult | null = loadImportedManifest();
+  if (!manifest || !isTauriAvailable()) return null;
+  const { appDataDir } = await import('@tauri-apps/api/path');
+  const { convertFileSrc } = await import('@tauri-apps/api/core');
+  const root = await appDataDir();
+  const base = root.replace(/[/\\]+$/, '');
+  const toUrl = (rel: string): string =>
+    convertFileSrc(`${base}/live2d/imported/${rel.replace(/\\/g, '/')}`);
+  return {
+    modelUrl: toUrl(manifest.modelPath),
+    coreUrl: manifest.corePath ? toUrl(manifest.corePath) : null,
+  };
+}
 
 const hostEl = ref<HTMLDivElement | null>(null);
 const canvasEl = ref<HTMLCanvasElement | null>(null);
-const loadError = ref(MODEL_BUNDLED ? '' : NOT_BUNDLED_HINT);
+const loadError = ref(LIVE2D_MODEL_BUNDLED ? '' : NOT_BUNDLED_HINT);
 
 let app: PIXI.Application | null = null;
 let model: Live2DModelType | null = null;
@@ -52,13 +77,14 @@ const ACTION_MAP: Record<string, string | null> = {
 };
 
 let corePromise: Promise<void> | null = null;
-function loadCubismCore(): Promise<void> {
+function loadCubismCore(coreUrl: string): Promise<void> {
   corePromise ??= new Promise<void>((resolve, reject) => {
     if ((window as unknown as { Live2DCubismCore?: unknown }).Live2DCubismCore) return resolve();
     const script = document.createElement('script');
-    script.src = CORE_URL;
+    script.src = coreUrl;
     script.onload = () => resolve();
-    script.onerror = () => reject(new Error('Cubism Core 加载失败（本地文件缺失？）'));
+    script.onerror = () =>
+      reject(new Error('Cubism Core 加载失败（模型文件夹里缺少 live2dcubismcore.min.js？）'));
     document.head.appendChild(script);
   });
   return corePromise;
@@ -101,9 +127,24 @@ function setMouth(v: number) {
 }
 
 onMounted(async () => {
-  if (!MODEL_BUNDLED) return; // 发行版：直接展示回退文案，不发起任何请求
+  // 解析加载来源：内置模型 → 静态路径；无内置但用户导入过 → asset 协议。
+  // 两者都没有就停在诚实提示上，不发起任何请求（避免控制台 404 噪音）。
+  let sources: ResolvedSources | null;
   try {
-    await loadCubismCore();
+    sources = await resolveSources();
+  } catch (err) {
+    if (!disposed) loadError.value = `模型加载地址解析失败：${err instanceof Error ? err.message : String(err)}`;
+    return;
+  }
+  if (!sources) return; // 发行版且未导入模型：保持默认提示
+  try {
+    if (!sources.coreUrl) {
+      loadError.value =
+        '已导入 Live2D 模型，但文件夹里没有 Cubism Core（live2dcubismcore.min.js）。' +
+        '请从 Live2D 官网下载 Cubism SDK for Web，把其中的 live2dcubismcore.min.js 一起放进模型文件夹后重新导入。';
+      return;
+    }
+    await loadCubismCore(sources.coreUrl);
     if (!canvasEl.value || !hostEl.value || disposed) return;
     app = new PIXI.Application({
       view: canvasEl.value,
@@ -112,7 +153,7 @@ onMounted(async () => {
       antialias: true,
     });
     const { Live2DModel } = await import('pixi-live2d-display/cubism4');
-    const created = await Live2DModel.from(MODEL_URL, { autoInteract: false });
+    const created = await Live2DModel.from(sources.modelUrl, { autoInteract: false });
     if (disposed) {
       // 卸载早于模型加载完成：必须释放刚建出来的 model 与 app，否则两者都泄漏。
       created.destroy();

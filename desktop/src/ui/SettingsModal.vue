@@ -5,10 +5,16 @@ import {
   store,
   saveProviderSettings,
   setAvatarMode,
-  type AvatarMode,
   type ProviderSettings,
 } from '../app/store';
+import { avatarOptionLabel, AVATAR_MODES, LIVE2D_MODEL_BUNDLED, type AvatarMode } from '../app/avatarDefaults';
 import { getSecret } from '../platform/credentials';
+import {
+  importLive2dModel,
+  loadImportedManifest,
+  isTauriAvailable,
+  type ImportResult,
+} from '../platform/live2dImport';
 import {
   connectHa,
   perception,
@@ -28,6 +34,42 @@ const saveError = ref('');
  * 静默抹掉用户已存的 API Key（异步加载与点击保存的竞态）。
  */
 const keyLoaded = ref(false);
+
+/* ── Live2D 模型导入（用户自备素材，发行版不含模型） ── */
+const importSupported = isTauriAvailable();
+const importing = ref(false);
+const importProgress = ref('');
+const importResult = ref<ImportResult | null>(loadImportedManifest());
+const importError = ref('');
+
+async function runImport() {
+  if (importing.value) return;
+  importing.value = true;
+  importError.value = '';
+  importProgress.value = '请在弹出的窗口里选择模型文件夹…';
+  try {
+    const result = await importLive2dModel((p) => {
+      const mb = Math.round(p.bytesSent / 1024 / 1024);
+      const total = Math.round(p.totalBytes / 1024 / 1024);
+      importProgress.value = `导入中 ${p.fileIndex}/${p.fileCount} · ${p.relPath}（${mb}/${total} MB）`;
+    });
+    if (result === null) {
+      importProgress.value = '';
+      return;
+    }
+    importResult.value = result;
+    importProgress.value = result.corePath
+      ? `导入完成：${result.fileCount} 个文件。已切换到 Live2D。`
+      : `导入完成：${result.fileCount} 个文件，但缺少 Cubism Core（live2dcubismcore.min.js），需要补上才能显示。`;
+    // 导入成功即切换（默认视频人，导入模型后才用 Live2D）
+    if (result.corePath) setAvatarMode('live2d');
+  } catch (err) {
+    importError.value = err instanceof Error ? err.message : String(err);
+    importProgress.value = '';
+  } finally {
+    importing.value = false;
+  }
+}
 
 const haForm = reactive({ url: '', token: '' });
 const locForm = reactive({
@@ -124,10 +166,29 @@ function close() {
         <div class="field">
           <label>数字人形象</label>
           <select :value="store.avatarMode" @change="setAvatarMode(($event.target as HTMLSelectElement).value as AvatarMode)">
-            <option value="live2d">Live2D · 阿芙洛狄忒（可表情/动作控制）</option>
-            <option value="video">视频数字人（不可表情控制）</option>
-            <option value="scene3d">三维占位形象（实验）</option>
+            <option v-for="mode in AVATAR_MODES" :key="mode" :value="mode">{{ avatarOptionLabel(mode) }}</option>
           </select>
+          <small v-if="!LIVE2D_MODEL_BUNDLED" class="field-hint">
+            本安装包未内置 Live2D 模型（授权禁分发），已默认使用视频数字人；导入模型后即可切换。
+          </small>
+        </div>
+        <div v-if="!LIVE2D_MODEL_BUNDLED || importSupported" class="field">
+          <label>导入 Live2D 模型（模型文件夹需含 *.model3.json；Cubism Core 需一并提供）</label>
+          <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+            <button class="btn" type="button" :disabled="importing || !importSupported" @click="runImport">
+              {{ importing ? '导入中…' : '选择模型文件夹并导入' }}
+            </button>
+            <span v-if="importResult" class="mc-meta">
+              已导入：{{ importResult.modelPath }}<template v-if="importResult.corePath"> · 含 Cubism Core</template>
+            </span>
+          </div>
+          <p v-if="importProgress" class="field-note">{{ importProgress }}</p>
+          <p v-if="importError" class="field-note" style="color:var(--err)">{{ importError }}</p>
+          <p v-if="!importSupported" class="field-note">模型导入需要在桌面应用中使用（浏览器开发模式没有本机文件通道）。</p>
+          <p class="field-note">
+            导入的模型只存在你电脑的应用数据目录里，不会被上传或分发。缺 Cubism Core 时：从 Live2D 官网下载
+            Cubism SDK for Web，取其中的 live2dcubismcore.min.js 与模型放同一文件夹后重新导入。
+          </p>
         </div>
         <div class="field">
           <label>供应商模式</label>
